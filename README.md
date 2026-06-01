@@ -30,6 +30,7 @@ You can override selected settings with environment variables:
 
 ```bash
 STRATRAG_DATA_PATH=data/your_file.jsonl \
+STRATRAG_BENCHMARK_NAME=stratrag \
 STRATRAG_TOP_K=5 \
 STRATRAG_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2 \
 python -m src.stage1_data
@@ -51,6 +52,13 @@ Stage 1 accepts a local StratRAG JSON/JSONL file and normalizes each question to
 - `answer`
 - `question_type`
 
+Internally, the loader now has a benchmark adapter layer:
+
+- `load_benchmark_records(...)`: generic entry point for registered benchmarks.
+- `load_stratrag_records(...)`: StratRAG-compatible wrapper kept for Stage 1.
+- `BenchmarkRecord.to_haystack_documents()`: converts each candidate pool into Haystack `Document` objects with gold labels in `meta`.
+- `BenchmarkLoader`: Haystack custom component that outputs normalized records, Haystack documents, and stats.
+
 Run:
 
 ```bash
@@ -60,7 +68,7 @@ python -m src.stage1_data
 Or validate the included smoke fixture:
 
 ```bash
-python -m src.stage1_data --data-path tests/fixtures/sample_stratrag.jsonl
+python -m src.stage1_data --benchmark stratrag --data-path tests/fixtures/sample_stratrag.jsonl
 ```
 
 If the real StratRAG field names differ, update the field aliases in `src/config.py`.
@@ -90,6 +98,12 @@ Also supported through configurable aliases:
 - question type: `question_type`, `type`, `q_type`
 
 TODO: once the actual StratRAG file is placed under `data/`, confirm the concrete schema here.
+
+## Adding More Benchmarks
+
+Add a new adapter in `src/data_loader.py` that implements `BenchmarkAdapter.normalize(...)`, then register it in `BENCHMARK_ADAPTERS`.
+
+The rest of the retrieval/evaluation code should depend on `BenchmarkRecord` and Haystack `Document`, not raw dataset fields.
 
 ## Haystack API Notes
 

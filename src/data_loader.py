@@ -1,13 +1,16 @@
-"""Load and normalize StratRAG-style multi-hop QA records."""
+"""Load benchmark QA records and convert candidate pools to Haystack documents."""
 
 from __future__ import annotations
 
 import json
 import logging
+import hashlib
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence
+
+from haystack import Document, component
 
 from src.config import DataConfig
 
@@ -20,7 +23,7 @@ class DataFormatError(ValueError):
 
 @dataclass(frozen=True)
 class CandidateDocument:
-    """A normalized candidate document from the 15-document pool."""
+    """A normalized candidate document from a benchmark candidate pool."""
 
     source_index: int
     content: str
@@ -28,8 +31,8 @@ class CandidateDocument:
 
 
 @dataclass(frozen=True)
-class StratRAGRecord:
-    """Canonical record shape used by all pipeline stages."""
+class BenchmarkRecord:
+    """Canonical QA record shape used by all pipeline stages."""
 
     question: str
     candidate_docs: list[CandidateDocument]
@@ -37,11 +40,140 @@ class StratRAGRecord:
     answer: str
     question_type: str
     record_id: Optional[str] = None
+    benchmark_name: str = "stratrag"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the normalized record for JSON logging or fixtures."""
 
         return asdict(self)
+
+    def to_haystack_documents(self) -> list[Document]:
+        """Convert the record's candidate pool into Haystack `Document` objects.
+
+        The gold labels are preserved in document metadata so deterministic
+        evaluators can recover relevance labels after retrieval.
+        """
+
+        record_key = self.record_id or _stable_record_key(self.question)
+        gold_index_set = set(self.gold_indices)
+        documents: list[Document] = []
+
+        for candidate in self.candidate_docs:
+            documents.append(
+                Document(
+                    id=f"{self.benchmark_name}:{record_key}:doc:{candidate.source_index}",
+                    content=candidate.content,
+                    meta={
+                        "benchmark": self.benchmark_name,
+                        "record_id": self.record_id,
+                        "question": self.question,
+                        "answer": self.answer,
+                        "question_type": self.question_type,
+                        "source_index": candidate.source_index,
+                        "title": candidate.title,
+                        "is_gold": candidate.source_index in gold_index_set,
+                        "gold_indices": self.gold_indices,
+                    },
+                )
+            )
+
+        return documents
+
+
+StratRAGRecord = BenchmarkRecord
+
+
+class BenchmarkAdapter(Protocol):
+    """Adapter interface for benchmark-specific raw record normalization."""
+
+    name: str
+
+    def normalize(
+        self,
+        raw: Mapping[str, Any],
+        record_position: int,
+        config: DataConfig,
+    ) -> BenchmarkRecord:
+        """Map one raw benchmark record to the project canonical shape."""
+
+
+@dataclass(frozen=True)
+class StratRAGAdapter:
+    """Adapter for StratRAG records derived from HotpotQA distractor pools."""
+
+    name: str = "stratrag"
+
+    def normalize(
+        self,
+        raw: Mapping[str, Any],
+        record_position: int,
+        config: DataConfig,
+    ) -> BenchmarkRecord:
+        """Normalize one raw StratRAG-style record."""
+
+        return _normalize_stratrag_record(raw, record_position, config, self.name)
+
+
+BENCHMARK_ADAPTERS: dict[str, BenchmarkAdapter] = {
+    "stratrag": StratRAGAdapter(),
+}
+
+
+@component
+class BenchmarkLoader:
+    """Haystack component that loads benchmark records and candidate documents."""
+
+    def __init__(
+        self,
+        benchmark_name: str = "stratrag",
+        config: Optional[DataConfig] = None,
+    ) -> None:
+        """Create a benchmark loader component for Haystack pipelines."""
+
+        self.benchmark_name = benchmark_name
+        self.config = config or DataConfig(benchmark_name=benchmark_name)
+
+    @component.output_types(records=list, documents=list, stats=dict)
+    def run(self, data_path: Optional[str] = None, limit: Optional[int] = None) -> dict[str, Any]:
+        """Load records and expose Haystack documents as component outputs."""
+
+        path = Path(data_path) if data_path is not None else self.config.path
+        records = load_benchmark_records(
+            path,
+            benchmark_name=self.benchmark_name,
+            config=self.config,
+            limit=limit,
+        )
+        documents = records_to_haystack_documents(records)
+        return {
+            "records": records,
+            "documents": documents,
+            "stats": summarize_records(records),
+        }
+
+
+def load_benchmark_records(
+    path: Path,
+    benchmark_name: str = "stratrag",
+    config: Optional[DataConfig] = None,
+    limit: Optional[int] = None,
+) -> list[BenchmarkRecord]:
+    """Load records for any registered benchmark adapter."""
+
+    data_config = config or DataConfig(benchmark_name=benchmark_name)
+    adapter = get_benchmark_adapter(benchmark_name)
+    raw_records = _read_json_records(path)
+    normalized: list[BenchmarkRecord] = []
+
+    for idx, raw in enumerate(raw_records):
+        if limit is not None and len(normalized) >= limit:
+            break
+        if not isinstance(raw, Mapping):
+            raise DataFormatError(f"Record {idx} is not a JSON object: {type(raw)!r}")
+        normalized.append(adapter.normalize(raw, idx, data_config))
+
+    logger.info("Loaded %d %s records from %s", len(normalized), benchmark_name, path)
+    return normalized
 
 
 def load_stratrag_records(
@@ -64,19 +196,30 @@ def load_stratrag_records(
         DataFormatError: If records cannot be mapped to the expected shape.
     """
 
-    data_config = config or DataConfig()
-    raw_records = _read_json_records(path)
-    normalized: list[StratRAGRecord] = []
+    return load_benchmark_records(
+        path,
+        benchmark_name="stratrag",
+        config=config or DataConfig(benchmark_name="stratrag"),
+        limit=limit,
+    )
 
-    for idx, raw in enumerate(raw_records):
-        if limit is not None and len(normalized) >= limit:
-            break
-        if not isinstance(raw, Mapping):
-            raise DataFormatError(f"Record {idx} is not a JSON object: {type(raw)!r}")
-        normalized.append(normalize_record(raw, idx, data_config))
 
-    logger.info("Loaded %d StratRAG records from %s", len(normalized), path)
-    return normalized
+def get_benchmark_adapter(benchmark_name: str) -> BenchmarkAdapter:
+    """Return a registered benchmark adapter by name."""
+
+    try:
+        return BENCHMARK_ADAPTERS[benchmark_name]
+    except KeyError as exc:
+        available = ", ".join(sorted(BENCHMARK_ADAPTERS))
+        raise DataFormatError(
+            f"Unsupported benchmark '{benchmark_name}'. Available adapters: {available}."
+        ) from exc
+
+
+def records_to_haystack_documents(records: Sequence[BenchmarkRecord]) -> list[Document]:
+    """Flatten benchmark candidate pools into Haystack documents."""
+
+    return [document for record in records for document in record.to_haystack_documents()]
 
 
 def normalize_record(
@@ -87,6 +230,18 @@ def normalize_record(
     """Normalize one raw StratRAG-style record."""
 
     data_config = config or DataConfig()
+    return _normalize_stratrag_record(raw, record_position, data_config, "stratrag")
+
+
+def _normalize_stratrag_record(
+    raw: Mapping[str, Any],
+    record_position: int,
+    config: DataConfig,
+    benchmark_name: str,
+) -> BenchmarkRecord:
+    """Normalize one raw StratRAG-style record."""
+
+    data_config = config
     question = _require_str(raw, data_config.question_field, record_position)
     candidate_value = _require_first_present(
         raw,
@@ -137,24 +292,27 @@ def normalize_record(
     record_id_value = _first_present(raw, ("id", "_id", "qid", "question_id"))
     record_id = None if record_id_value is None else str(record_id_value)
 
-    return StratRAGRecord(
+    return BenchmarkRecord(
         question=question,
         candidate_docs=candidate_docs,
         gold_indices=gold_indices,
         answer=answer,
         question_type=question_type,
         record_id=record_id,
+        benchmark_name=benchmark_name,
     )
 
 
-def summarize_records(records: Sequence[StratRAGRecord]) -> dict[str, Any]:
+def summarize_records(records: Sequence[BenchmarkRecord]) -> dict[str, Any]:
     """Compute deterministic Stage 1 dataset statistics."""
 
+    benchmark_counts = Counter(record.benchmark_name for record in records)
     type_counts = Counter(record.question_type for record in records)
     candidate_counts = Counter(len(record.candidate_docs) for record in records)
     gold_counts = Counter(len(record.gold_indices) for record in records)
     return {
         "total_questions": len(records),
+        "benchmark_distribution": dict(sorted(benchmark_counts.items())),
         "question_type_distribution": dict(sorted(type_counts.items())),
         "candidate_doc_count_distribution": {
             str(key): value for key, value in sorted(candidate_counts.items())
@@ -197,6 +355,12 @@ def _read_json_records(path: Path) -> list[Any]:
     raise DataFormatError(
         f"Expected {path} to contain a JSON array, JSONL records, or a dict with a list split."
     )
+
+
+def _stable_record_key(question: str) -> str:
+    """Create a stable fallback key for records without explicit IDs."""
+
+    return hashlib.sha1(question.encode("utf-8")).hexdigest()[:16]
 
 
 def _normalize_candidate_docs(value: Any, record_position: int) -> list[CandidateDocument]:

@@ -11,6 +11,7 @@ from pathlib import Path
 class DataConfig:
     """Configuration for loading StratRAG-style records."""
 
+    benchmark_name: str = "stratrag"
     path: Path = Path("data/stratrag.jsonl")
     question_field: str = "question"
     candidate_doc_fields: tuple[str, ...] = (
@@ -70,9 +71,10 @@ def get_config() -> AppConfig:
     """Build configuration from defaults plus environment variable overrides."""
 
     data_path = Path(os.getenv("STRATRAG_DATA_PATH", str(DataConfig.path)))
+    benchmark_name = os.getenv("STRATRAG_BENCHMARK_NAME", DataConfig.benchmark_name)
     top_k = int(os.getenv("STRATRAG_TOP_K", str(RetrievalConfig.top_k)))
 
-    data = DataConfig(path=data_path)
+    data = DataConfig(benchmark_name=benchmark_name, path=data_path)
     retrieval = RetrievalConfig(
         embedding_model=os.getenv(
             "STRATRAG_EMBEDDING_MODEL",

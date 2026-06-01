@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.config import get_config
-from src.data_loader import load_stratrag_records, summarize_records
+from src.data_loader import load_benchmark_records, summarize_records
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -22,6 +22,11 @@ def main(argv: Optional[list[str]] = None) -> None:
         type=Path,
         default=config.data.path,
         help="Path to StratRAG JSON or JSONL data.",
+    )
+    parser.add_argument(
+        "--benchmark",
+        default=config.data.benchmark_name,
+        help="Registered benchmark adapter name.",
     )
     parser.add_argument(
         "--sample-index",
@@ -42,7 +47,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         format="%(levelname)s:%(name)s:%(message)s",
     )
 
-    records = load_stratrag_records(args.data_path, config=config.data, limit=args.limit)
+    records = load_benchmark_records(
+        args.data_path,
+        benchmark_name=args.benchmark,
+        config=config.data,
+        limit=args.limit,
+    )
     stats = summarize_records(records)
     logging.info("dataset_stats=%s", json.dumps(stats, ensure_ascii=False, sort_keys=True))
 
