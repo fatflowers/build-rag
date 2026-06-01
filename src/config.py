@@ -26,6 +26,7 @@ class DataConfig:
         "gold_doc_indices",
         "supporting_doc_indices",
         "supporting_indices",
+        "supporting_facts",
     )
     answer_fields: tuple[str, ...] = ("answer", "final_answer")
     question_type_fields: tuple[str, ...] = ("question_type", "type", "q_type")

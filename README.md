@@ -57,6 +57,12 @@ Run:
 python -m src.stage1_data
 ```
 
+Or validate the included smoke fixture:
+
+```bash
+python -m src.stage1_data --data-path tests/fixtures/sample_stratrag.jsonl
+```
+
 If the real StratRAG field names differ, update the field aliases in `src/config.py`.
 
 ## Data Format Assumption
@@ -79,6 +85,7 @@ Also supported through configurable aliases:
 
 - candidate documents: `candidate_docs`, `context`, `contexts`, `documents`, `docs`, `paragraphs`
 - gold indices: `gold_indices`, `gold_doc_indices`, `supporting_doc_indices`, `supporting_indices`
+- HotpotQA-style support facts: `supporting_facts` as `[[title, sentence_id], ...]`, mapped to candidate titles
 - answer: `answer`, `final_answer`
 - question type: `question_type`, `type`, `q_type`
 
