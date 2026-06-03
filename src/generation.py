@@ -122,20 +122,15 @@ def generate_answer(
 ) -> GeneratedAnswer:
     """Build a grounded prompt, generate an answer, and attach citations."""
 
-    timings: dict[str, float] = {}
     start = time.perf_counter()
     prompt, citations = build_generation_prompt(config, query, documents)
-    timings["prompt_build_seconds"] = time.perf_counter() - start
 
     if _should_fallback(config, documents):
-        return _fallback_answer(config, query, prompt, timings)
+        return _fallback_answer(config, query, prompt, time.perf_counter() - start)
 
-    generation_start = time.perf_counter()
     active_generator = generator or _build_generator(config)
     answer = _first_reply(active_generator, prompt) or config.generation.no_answer_text
-    timings["generation_seconds"] = time.perf_counter() - generation_start
 
-    check_start = time.perf_counter()
     no_answer = _is_no_answer(answer, config.generation.no_answer_text)
     used_citations = _select_citations(answer, citations, no_answer)
     context = "\n".join(document.content or "" for document in documents)
@@ -145,8 +140,6 @@ def generate_answer(
         no_answer = True
         used_citations = []
     relevance = 0.0 if no_answer else lexical_support_score(query, answer)
-    timings["groundedness_check_seconds"] = time.perf_counter() - check_start
-    timings["total_seconds"] = time.perf_counter() - start
 
     return GeneratedAnswer(
         query=query,
@@ -156,7 +149,7 @@ def generate_answer(
         groundedness=groundedness,
         answer_relevance=relevance,
         no_answer=no_answer,
-        timings=timings,
+        timings={"total_seconds": time.perf_counter() - start},
     )
 
 
@@ -254,11 +247,8 @@ def _fallback_answer(
     config: AppConfig,
     query: str,
     prompt: str,
-    timings: dict[str, float],
+    elapsed_seconds: float,
 ) -> GeneratedAnswer:
-    timings["generation_seconds"] = 0.0
-    timings["groundedness_check_seconds"] = 0.0
-    timings["total_seconds"] = sum(timings.values())
     return GeneratedAnswer(
         query=query,
         answer=config.generation.no_answer_text,
@@ -267,7 +257,7 @@ def _fallback_answer(
         groundedness=1.0,
         answer_relevance=0.0,
         no_answer=True,
-        timings=timings,
+        timings={"total_seconds": elapsed_seconds},
     )
 
 

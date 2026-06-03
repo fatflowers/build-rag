@@ -44,6 +44,8 @@ Pipeline 3 has generation and evaluation:
 - retrieval metrics include recall@k, precision@k, MRR, nDCG, and hit rate
 - system metrics include latency, estimated token cost, retrieved document count, and context size
 
+Business outputs keep only end-to-end latency. Component-level runtime inspection should use Haystack tracing, OpenTelemetry, or MLflow autologging instead of per-component `perf_counter` code.
+
 ## Setup
 
 ```bash

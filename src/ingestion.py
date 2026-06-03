@@ -286,7 +286,6 @@ def run_ingestion(
         split=config.data.split,
         limit=config.data.limit,
     )
-    load_done = time.perf_counter()
 
     chroma_count: int | None = None
     document_store = None
@@ -307,24 +306,16 @@ def run_ingestion(
     if document_store is not None:
         chroma_count = document_store.count_documents()
 
-    pipeline_done = time.perf_counter()
-
     logger.info("Writing chunk JSONL to %s", config.chunks_path)
     _write_chunk_jsonl(chunks, config.chunks_path)
     bm25_count = pipeline_run.bm25_count
-    output_done = time.perf_counter()
 
     manifest = _build_manifest(
         config=config,
         stats=stats,
         chunks=chunks,
         chroma_count=chroma_count,
-        timings={
-            "load_seconds": load_done - start,
-            "haystack_pipeline_seconds": pipeline_done - load_done,
-            "output_seconds": output_done - pipeline_done,
-            "total_seconds": output_done - start,
-        },
+        elapsed_seconds=time.perf_counter() - start,
         skip_chroma=skip_chroma,
         skip_bm25=skip_bm25,
         bm25_count=bm25_count,
@@ -377,7 +368,7 @@ def _build_manifest(
     chunks: list[Document],
     chroma_count: int | None,
     bm25_count: int | None,
-    timings: dict[str, float],
+    elapsed_seconds: float,
     skip_chroma: bool,
     skip_bm25: bool,
 ) -> dict[str, JsonValue]:
@@ -444,10 +435,7 @@ def _build_manifest(
             "supporting_chunks": supporting_chunks,
         },
         "timings": {
-            "load_seconds": timings["load_seconds"],
-            "haystack_pipeline_seconds": timings["haystack_pipeline_seconds"],
-            "output_seconds": timings["output_seconds"],
-            "total_seconds": timings["total_seconds"],
+            "total_seconds": elapsed_seconds,
         },
     }
 

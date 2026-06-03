@@ -202,17 +202,14 @@ class QueryProcessorComponent:
     @component.output_types(
         processed_query=ProcessedQuery,
         query=str,
-        query_timings=dict[str, float],
     )
-    def run(self, query: str) -> dict[str, ProcessedQuery | str | dict[str, float]]:
+    def run(self, query: str) -> dict[str, ProcessedQuery | str]:
         """Rewrite, expand, apply HyDE, and route a query."""
 
-        start = time.perf_counter()
         processed_query = self.processor.run(query)
         return {
             "processed_query": processed_query,
             "query": query,
-            "query_timings": {"query_processing_seconds": time.perf_counter() - start},
         }
 
 
@@ -237,16 +234,15 @@ class BM25RetrievalComponent:
     def __init__(self, config: RetrievalConfig) -> None:
         self.config = config
 
-    @component.output_types(bm25_documents=list[Document], bm25_timings=dict[str, float])
+    @component.output_types(bm25_documents=list[Document])
     def run(
         self,
         processed_query: ProcessedQuery,
         filters: MetadataFilter | None,
         bm25_store: InMemoryDocumentStore,
-    ) -> dict[str, list[Document] | dict[str, float]]:
+    ) -> dict[str, list[Document]]:
         """Retrieve sparse candidates when the route needs BM25."""
 
-        start = time.perf_counter()
         documents: list[Document] = []
         if processed_query.route in {"hybrid", "bm25"}:
             documents = _run_bm25_retrieval(
@@ -255,10 +251,7 @@ class BM25RetrievalComponent:
                 filters,
                 self.config.bm25_top_k,
             )
-        return {
-            "bm25_documents": documents,
-            "bm25_timings": {"bm25_retrieval_seconds": time.perf_counter() - start},
-        }
+        return {"bm25_documents": documents}
 
 
 @component
@@ -268,22 +261,18 @@ class DenseRetrievalComponent:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
 
-    @component.output_types(dense_documents=list[Document], dense_timings=dict[str, float])
+    @component.output_types(dense_documents=list[Document])
     def run(
         self,
         processed_query: ProcessedQuery,
         filters: MetadataFilter | None,
-    ) -> dict[str, list[Document] | dict[str, float]]:
+    ) -> dict[str, list[Document]]:
         """Retrieve dense candidates when the route needs vector search."""
 
-        start = time.perf_counter()
         documents: list[Document] = []
         if processed_query.route in {"hybrid", "dense"}:
             documents = _run_dense_retrieval(self.config, processed_query, filters)
-        return {
-            "dense_documents": documents,
-            "dense_timings": {"dense_retrieval_seconds": time.perf_counter() - start},
-        }
+        return {"dense_documents": documents}
 
 
 @component
@@ -293,24 +282,20 @@ class HybridFusionComponent:
     def __init__(self, config: RetrievalConfig) -> None:
         self.config = config
 
-    @component.output_types(fused_documents=list[Document], fusion_timings=dict[str, float])
+    @component.output_types(fused_documents=list[Document])
     def run(
         self,
         dense_documents: list[Document],
         bm25_documents: list[Document],
-    ) -> dict[str, list[Document] | dict[str, float]]:
+    ) -> dict[str, list[Document]]:
         """Fuse candidate rankings with RRF or weighted fusion."""
 
-        start = time.perf_counter()
         documents = fuse_hybrid_results(
             dense_documents=dense_documents,
             bm25_documents=bm25_documents,
             config=self.config,
         )
-        return {
-            "fused_documents": documents,
-            "fusion_timings": {"fusion_seconds": time.perf_counter() - start},
-        }
+        return {"fused_documents": documents}
 
 
 @component
@@ -320,20 +305,16 @@ class RerankComponent:
     def __init__(self, config: RetrievalConfig) -> None:
         self.config = config
 
-    @component.output_types(ranked_documents=list[Document], rerank_timings=dict[str, float])
+    @component.output_types(ranked_documents=list[Document])
     def run(
         self,
         query: str,
         fused_documents: list[Document],
-    ) -> dict[str, list[Document] | dict[str, float]]:
+    ) -> dict[str, list[Document]]:
         """Apply the configured reranker."""
 
-        start = time.perf_counter()
         documents = _rerank_documents(query, fused_documents, self.config)
-        return {
-            "ranked_documents": documents,
-            "rerank_timings": {"rerank_seconds": time.perf_counter() - start},
-        }
+        return {"ranked_documents": documents}
 
 
 @component
@@ -343,16 +324,12 @@ class ContextCompressionComponent:
     def __init__(self, config: RetrievalConfig) -> None:
         self.config = config
 
-    @component.output_types(compressed_documents=list[Document], compression_timings=dict[str, float])
-    def run(self, ranked_documents: list[Document]) -> dict[str, list[Document] | dict[str, float]]:
+    @component.output_types(compressed_documents=list[Document])
+    def run(self, ranked_documents: list[Document]) -> dict[str, list[Document]]:
         """Compress and deduplicate candidate documents."""
 
-        start = time.perf_counter()
         documents = compress_and_deduplicate_documents(ranked_documents, self.config)
-        return {
-            "compressed_documents": documents,
-            "compression_timings": {"compression_seconds": time.perf_counter() - start},
-        }
+        return {"compressed_documents": documents}
 
 
 @component
@@ -362,20 +339,16 @@ class ParentExpansionComponent:
     def __init__(self, config: RetrievalConfig) -> None:
         self.config = config
 
-    @component.output_types(expanded_documents=list[Document], expansion_timings=dict[str, float])
+    @component.output_types(expanded_documents=list[Document])
     def run(
         self,
         compressed_documents: list[Document],
         bm25_store: InMemoryDocumentStore,
-    ) -> dict[str, list[Document] | dict[str, float]]:
+    ) -> dict[str, list[Document]]:
         """Apply small-to-big parent document expansion."""
 
-        start = time.perf_counter()
         documents = expand_parent_documents(compressed_documents, bm25_store, self.config)
-        return {
-            "expanded_documents": documents,
-            "expansion_timings": {"expansion_seconds": time.perf_counter() - start},
-        }
+        return {"expanded_documents": documents}
 
 
 @component
@@ -391,39 +364,16 @@ class RetrievalResultBuilderComponent:
         processed_query: ProcessedQuery,
         filters: MetadataFilter | None,
         expanded_documents: list[Document],
-        query_timings: dict[str, float],
-        bm25_timings: dict[str, float],
-        dense_timings: dict[str, float],
-        fusion_timings: dict[str, float],
-        rerank_timings: dict[str, float],
-        compression_timings: dict[str, float],
-        expansion_timings: dict[str, float],
     ) -> dict[str, RetrievalResult]:
-        """Collect final documents and timings."""
+        """Collect final documents."""
 
-        timings = _merge_timings(
-            query_timings,
-            bm25_timings,
-            dense_timings,
-            fusion_timings,
-            rerank_timings,
-            compression_timings,
-            expansion_timings,
-        )
-        timings["retrieval_seconds"] = (
-            timings.get("bm25_retrieval_seconds", 0.0)
-            + timings.get("dense_retrieval_seconds", 0.0)
-        )
-        timings["total_seconds"] = sum(
-            value for key, value in timings.items() if key != "total_seconds"
-        )
         return {
             "result": RetrievalResult(
                 query=processed_query,
                 documents=expanded_documents,
                 filters=filters,
                 fusion_algorithm=self.config.fusion_algorithm,
-                timings=timings,
+                timings={},
             )
         }
 
@@ -454,7 +404,6 @@ def add_retrieval_pipeline_components(pipeline: Pipeline, config: AppConfig) -> 
     pipeline.connect("query_processor.processed_query", "dense_retriever.processed_query")
     pipeline.connect("query_processor.processed_query", "result_builder.processed_query")
     pipeline.connect("query_processor.query", "reranker.query")
-    pipeline.connect("query_processor.query_timings", "result_builder.query_timings")
 
     pipeline.connect("metadata_filter.filters", "bm25_retriever.filters")
     pipeline.connect("metadata_filter.filters", "dense_retriever.filters")
@@ -464,18 +413,12 @@ def add_retrieval_pipeline_components(pipeline: Pipeline, config: AppConfig) -> 
     pipeline.connect("bm25_store_loader.bm25_store", "parent_expander.bm25_store")
 
     pipeline.connect("bm25_retriever.bm25_documents", "hybrid_fusion.bm25_documents")
-    pipeline.connect("bm25_retriever.bm25_timings", "result_builder.bm25_timings")
     pipeline.connect("dense_retriever.dense_documents", "hybrid_fusion.dense_documents")
-    pipeline.connect("dense_retriever.dense_timings", "result_builder.dense_timings")
 
     pipeline.connect("hybrid_fusion.fused_documents", "reranker.fused_documents")
-    pipeline.connect("hybrid_fusion.fusion_timings", "result_builder.fusion_timings")
     pipeline.connect("reranker.ranked_documents", "context_compressor.ranked_documents")
-    pipeline.connect("reranker.rerank_timings", "result_builder.rerank_timings")
     pipeline.connect("context_compressor.compressed_documents", "parent_expander.compressed_documents")
-    pipeline.connect("context_compressor.compression_timings", "result_builder.compression_timings")
     pipeline.connect("parent_expander.expanded_documents", "result_builder.expanded_documents")
-    pipeline.connect("parent_expander.expansion_timings", "result_builder.expansion_timings")
 
 
 def run_retrieval(
@@ -487,6 +430,7 @@ def run_retrieval(
     """Run Pipeline 2 through a Haystack Pipeline graph."""
 
     pipeline = build_retrieval_pipeline(config)
+    start = time.perf_counter()
     output = cast(
         Mapping[str, Mapping[str, object]],
         pipeline.run(
@@ -500,7 +444,7 @@ def run_retrieval(
     )
     result = output["result_builder"]["result"]
     if isinstance(result, RetrievalResult):
-        return result
+        return replace(result, timings={"total_seconds": time.perf_counter() - start})
     raise TypeError("Retrieval pipeline did not return a RetrievalResult.")
 
 
@@ -796,13 +740,6 @@ def _score(document: Document) -> float:
 def _max_score(documents: list[Document]) -> float:
     scores = [_score(document) for document in documents]
     return max(scores) if scores and max(scores) > 0 else 1.0
-
-
-def _merge_timings(*timing_groups: dict[str, float]) -> dict[str, float]:
-    timings: dict[str, float] = {}
-    for group in timing_groups:
-        timings.update(group)
-    return timings
 
 
 def _split_id(document: Document) -> int:

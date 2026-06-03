@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Mapping, cast
 
 from haystack import Pipeline, component
 
 from src.config import AppConfig
-from src.evaluation import RagEvaluationReport, evaluate_rag_result, evaluation_report_to_json
+from src.evaluation import (
+    RagEvaluationReport,
+    evaluate_rag_result,
+    evaluation_report_to_json,
+)
 from src.generation import GeneratedAnswer, TextGenerator, generate_answer, generated_answer_to_json
 from src.retrieval import (
     JsonValue,
@@ -109,6 +114,7 @@ def run_rag(
     """Run Pipeline 3 through a Haystack Pipeline graph."""
 
     pipeline = build_rag_pipeline(config, generator=generator)
+    start = time.perf_counter()
     output = cast(
         Mapping[str, Mapping[str, object]],
         pipeline.run(
@@ -134,6 +140,13 @@ def run_rag(
         raise TypeError("RAG pipeline did not return a GeneratedAnswer.")
     if not isinstance(evaluation, RagEvaluationReport):
         raise TypeError("RAG pipeline did not return a RagEvaluationReport.")
+    evaluation = replace(
+        evaluation,
+        system=replace(
+            evaluation.system,
+            latency_seconds=time.perf_counter() - start,
+        ),
+    )
     return RagPipelineResult(
         retrieval=retrieval,
         generation=generation,
