@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "haystack-docs": {
+      "type": "http",
+      "url": "https://docs.haystack.deepset.ai/api/mcp"
+    }
+  }
+}

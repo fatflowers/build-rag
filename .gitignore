@@ -12,3 +12,4 @@ data/*
 !data/.gitkeep
 results/*
 !results/.gitkeep
+.env

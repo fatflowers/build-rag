@@ -1,4 +1,4 @@
-"""StratRAG evaluation pipeline package."""
+"""HotpotQA RAG evaluation pipeline."""
 
 __all__ = ["__version__"]
 

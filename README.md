@@ -1,113 +1,169 @@
-# StratRAG Retrieval Evaluation Pipeline
+# HotpotQA RAG Evaluation Pipeline
 
-This project is a phased Haystack 2.x RAG evaluation pipeline for multi-hop retrieval experiments on StratRAG-style data.
+This repository is being reset into a phased Haystack 2.x RAG evaluation project based on HotpotQA.
 
-The immediate goal is to build the project in independently runnable stages. Retrieval evaluation must run without any LLM or API key, and later generation evaluation will use local Ollama by default.
+The implementation plan lives in `plan.md`. The project is organized around two main pipelines:
 
-## Current Status
+- ingestion: parsing, chunking, metadata handling, dense/sparse indexing, and index updates.
+- retrieval: query processing, metadata filtering, hybrid search, rerank, context compression, and chunk expansion.
+- generation/evaluation: prompt assembly, answer generation, citations, groundedness/no-answer checks, retrieval metrics, answer metrics, and system metrics.
 
-- Stage 0: project skeleton and configuration.
-- Stage 1: StratRAG data loading and dataset statistics.
-- Stage 2+: intentionally not implemented yet. Wait for data-format validation before retrieval code is added.
+## Status
+
+Pipeline 1 has a small HotpotQA ingestion implementation:
+
+- parse HotpotQA records into Haystack `Document` objects
+- split documents with Haystack `DocumentSplitter`
+- generate Anthropic-style contextual retrieval text for each chunk
+- persist chunks to `data/hotpotqa_chunks.jsonl` for sparse/BM25 work
+- persist a Haystack BM25 document store to `data/hotpotqa_bm25_store.json`
+- index DashScope/Qwen dense embeddings into a local Chroma store
+- write an ingestion manifest to `results/ingestion_manifest.json`
+
+Pipeline 2 has a retrieval implementation:
+
+- implemented as a Haystack `Pipeline` graph, not a hand-written stage loop
+- query processing hooks for rewrite, expansion, HyDE, and routing
+- metadata filters for source, title, level, type, and permissions
+- BM25 retrieval from `InMemoryDocumentStore`
+- optional dense retrieval from Chroma using DashScope embeddings
+- hybrid fusion with RRF or weighted scores
+- optional rerank
+- context compression and deduplication
+- small-to-big parent document expansion
+
+Pipeline 3 has generation and evaluation:
+
+- implemented as a Haystack `Pipeline` graph that extends Pipeline 2
+- Haystack `PromptBuilder` assembles query plus retrieved sources into a cited prompt
+- Haystack `OpenAIGenerator` calls the configured OpenAI-compatible chat endpoint
+- answers are attributed to numbered source chunks or parent documents
+- no-answer fallback runs when there is no retrieved context or scores are below threshold
+- low groundedness can also trigger the no-answer fallback
+- groundedness and answer relevance use lightweight lexical checks
+- retrieval metrics include recall@k, precision@k, MRR, nDCG, and hit rate
+- system metrics include latency, estimated token cost, retrieved document count, and context size
 
 ## Setup
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
-## Configuration
+Alternatively, use a regular virtual environment and run `pip install -e ".[dev]"`.
 
-Runtime parameters live in `src/config.py`. The default data path is:
-
-```text
-data/stratrag.jsonl
-```
-
-You can override selected settings with environment variables:
+Dense indexing uses Haystack `OpenAIDocumentEmbedder` with DashScope's OpenAI-compatible endpoint by default:
 
 ```bash
-STRATRAG_DATA_PATH=data/your_file.jsonl \
-STRATRAG_BENCHMARK_NAME=stratrag \
-STRATRAG_TOP_K=5 \
-STRATRAG_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2 \
-python -m src.stage1_data
+cat > .env <<'EOF'
+DASHSCOPE_API_KEY=your_api_key
+INGEST_CONTEXTUAL_RETRIEVAL=true
+INGEST_CONTEXTUAL_MODEL=qwen-flash
+INGEST_CONTEXTUAL_MAX_TOKENS=120
+INGEST_CONTEXTUAL_TEMPERATURE=0
+BM25_STORE_PATH=data/hotpotqa_bm25_store.json
+BM25_ALGORITHM=BM25L
+INGEST_EMBEDDING_MODEL=text-embedding-v4
+INGEST_EMBEDDING_DIMENSION=1024
+INGEST_EMBEDDING_API_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+INGEST_EMBEDDING_BATCH_SIZE=10
+GENERATION_MODEL=qwen-flash
+GENERATION_API_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+GENERATION_MAX_TOKENS=512
+GENERATION_TEMPERATURE=0
+GENERATION_MIN_GROUNDEDNESS=0.2
+EOF
 ```
 
-## Stage 0 Validation
+Contextual retrieval follows Anthropic's pattern: for each chunk, the pipeline prompts a generator with the whole parent document and the chunk, then prepends the generated concise context before writing JSONL or embedding into Chroma.
+
+## Run Ingestion
+
+Run a small Hugging Face slice without Chroma and without generator calls:
 
 ```bash
-python -c "import src; from src.config import get_config; print(get_config())"
+uv run python -m src.stage2_ingestion \
+  --limit 2 \
+  --skip-chroma \
+  --skip-contextual-retrieval
 ```
 
-## Stage 1 Validation
+This still writes the BM25 store unless you pass `--skip-bm25`.
 
-Stage 1 accepts a local StratRAG JSON/JSONL file and normalizes each question to:
-
-- `question`
-- `candidate_docs`
-- `gold_indices`
-- `answer`
-- `question_type`
-
-Internally, the loader now has a benchmark adapter layer:
-
-- `load_benchmark_records(...)`: generic entry point for registered benchmarks.
-- `load_stratrag_records(...)`: StratRAG-compatible wrapper kept for Stage 1.
-- `BenchmarkRecord.to_haystack_documents()`: converts each candidate pool into Haystack `Document` objects with gold labels in `meta`.
-- `BenchmarkLoader`: Haystack custom component that outputs normalized records, Haystack documents, and stats.
-
-Run:
+Run dense indexing into local Chroma:
 
 ```bash
-python -m src.stage1_data
+uv run python -m src.stage2_ingestion \
+  --limit 2 \
+  --rebuild
 ```
 
-Or validate the included smoke fixture:
+If you change embedding model or dimension, rebuild Chroma so the collection uses one consistent vector shape.
+If you change chunking or contextual retrieval settings, rebuild both Chroma and BM25 so dense and sparse retrieval use the same chunk text.
+
+The loader uses Hugging Face:
+
+```python
+from datasets import load_dataset
+
+ds = load_dataset("hotpotqa/hotpot_qa", "fullwiki")["validation"]
+```
+
+The ingestion CLI uses the same dataset/config and loads `validation[:limit]` by default.
+
+## Run Retrieval
+
+Run a local BM25-only retrieval smoke test:
 
 ```bash
-python -m src.stage1_data --benchmark stratrag --data-path tests/fixtures/sample_stratrag.jsonl
+uv run python -m src.stage3_retrieval \
+  "Scott Derrickson nationality" \
+  --search-mode bm25
 ```
 
-If the real StratRAG field names differ, update the field aliases in `src/config.py`.
+Apply metadata filtering:
 
-## Data Format Assumption
-
-The loader is intentionally conservative because the exact local StratRAG export schema has not been verified in this repository yet.
-
-Expected canonical shape:
-
-```json
-{
-  "question": "...",
-  "candidate_docs": ["doc 0", "doc 1", "..."],
-  "gold_indices": [0, 4],
-  "answer": "...",
-  "question_type": "bridge"
-}
+```bash
+uv run python -m src.stage3_retrieval \
+  "Scott Derrickson nationality" \
+  --search-mode bm25 \
+  --filter-title "Adam Collis" \
+  --no-parent-expansion
 ```
 
-Also supported through configurable aliases:
+Hybrid retrieval uses RRF by default:
 
-- candidate documents: `candidate_docs`, `context`, `contexts`, `documents`, `docs`, `paragraphs`
-- gold indices: `gold_indices`, `gold_doc_indices`, `supporting_doc_indices`, `supporting_indices`
-- HotpotQA-style support facts: `supporting_facts` as `[[title, sentence_id], ...]`, mapped to candidate titles
-- answer: `answer`, `final_answer`
-- question type: `question_type`, `type`, `q_type`
+```bash
+uv run python -m src.stage3_retrieval \
+  "Scott Derrickson nationality" \
+  --search-mode hybrid \
+  --fusion rrf
+```
 
-TODO: once the actual StratRAG file is placed under `data/`, confirm the concrete schema here.
+Dense or hybrid retrieval requires a built Chroma index and `DASHSCOPE_API_KEY`.
 
-## Adding More Benchmarks
+## Run Generation And Evaluation
 
-Add a new adapter in `src/data_loader.py` that implements `BenchmarkAdapter.normalize(...)`, then register it in `BENCHMARK_ADAPTERS`.
+Run a BM25-only end-to-end RAG query:
 
-The rest of the retrieval/evaluation code should depend on `BenchmarkRecord` and Haystack `Document`, not raw dataset fields.
+```bash
+uv run python -m src.stage4_rag \
+  "Scott Derrickson nationality" \
+  --search-mode bm25
+```
 
-## Haystack API Notes
+Pass HotpotQA ground-truth parent document ids to compute retrieval metrics:
 
-Haystack MCP documentation was checked for the planned Stage 2 API surface. `InMemoryDocumentStore` and `InMemoryEmbeddingRetriever` are the intended in-memory retrieval components for the next stage:
+```bash
+uv run python -m src.stage4_rag \
+  "Scott Derrickson nationality" \
+  --search-mode bm25 \
+  --relevant-parent-doc-id p1
+```
 
-- https://docs.haystack.deepset.ai/docs/inmemorydocumentstore
-- https://docs.haystack.deepset.ai/reference/retrievers-api
+Set cost estimates through `.env` when you want system-level cost reporting:
+
+```bash
+EVALUATION_INPUT_TOKEN_COST_PER_1K=0.001
+EVALUATION_OUTPUT_TOKEN_COST_PER_1K=0.002
+```
