@@ -96,14 +96,22 @@ def test_contextual_retrieval_annotator_prepends_generated_context() -> None:
         content="The Louvre is in Paris.",
         meta={"parent_doc_id": "parent-1"},
     )
+    sibling_chunk = Document(
+        id="chunk-0",
+        content="The Eiffel Tower is in Paris.",
+        meta={"parent_doc_id": "parent-1"},
+    )
     generator = FakeGenerator()
     annotator = ContextualRetrievalAnnotator(
         config=ContextualRetrievalConfig(),
         generator=generator,
     )
 
-    result = annotator.run(documents=[chunk], source_documents=[source_document])
-    contextualized = result["documents"][0]
+    result = annotator.run(
+        documents=[sibling_chunk, chunk],
+        source_documents=[source_document],
+    )
+    contextualized = result["documents"][1]
 
     assert contextualized.content is not None
     assert contextualized.content.startswith("This chunk explains that the Louvre is in Paris.")
@@ -113,6 +121,46 @@ def test_contextual_retrieval_annotator_prepends_generated_context() -> None:
     )
     assert "<document>" in generator.prompts[0]
     assert "<chunk>" in generator.prompts[0]
+
+
+def test_contextual_retrieval_annotator_skips_unsplit_documents() -> None:
+    """A document that produced a single chunk is left as-is without an LLM call."""
+
+    class FakeGenerator:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def run(
+            self,
+            prompt: str,
+            *,
+            generation_kwargs: Mapping[str, int | float] | None = None,
+        ) -> dict[str, list[str]]:
+            self.prompts.append(prompt)
+            return {"replies": ["unexpected context"]}
+
+    source_document = Document(
+        id="parent-1",
+        content="The Louvre is in Paris.",
+        meta={"parent_doc_id": "parent-1", "title": "Paris landmarks"},
+    )
+    chunk = Document(
+        id="chunk-1",
+        content="The Louvre is in Paris.",
+        meta={"parent_doc_id": "parent-1"},
+    )
+    generator = FakeGenerator()
+    annotator = ContextualRetrievalAnnotator(
+        config=ContextualRetrievalConfig(),
+        generator=generator,
+    )
+
+    result = annotator.run(documents=[chunk], source_documents=[source_document])
+    contextualized = result["documents"][0]
+
+    assert generator.prompts == []
+    assert contextualized.content == "The Louvre is in Paris."
+    assert contextualized.meta["contextual_retrieval_context"] == ""
 
 
 def test_embedding_integrity_validator_fails_missing_embeddings() -> None:

@@ -76,9 +76,24 @@ class ContextualRetrievalAnnotator:
             parent_doc_id = source_document.meta.get("parent_doc_id") or source_document.id
             sources_by_parent_id[str(parent_doc_id)] = source_document
 
+        chunks_per_parent: dict[str, int] = {}
+        for document in documents:
+            parent_doc_id = str(document.meta["parent_doc_id"])
+            chunks_per_parent[parent_doc_id] = chunks_per_parent.get(parent_doc_id, 0) + 1
+
         contextualized_documents: list[Document] = []
         for document in documents:
             parent_doc_id = str(document.meta["parent_doc_id"])
+            chunk_text = document.content or ""
+            # A document that produced a single chunk was never split (e.g. the
+            # source text was short enough to fit in one chunk). The chunk already
+            # contains the full document, so situating it adds nothing — skip the
+            # LLM call entirely.
+            if chunks_per_parent[parent_doc_id] <= 1:
+                meta = dict(document.meta)
+                meta["contextual_retrieval_context"] = ""
+                contextualized_documents.append(replace(document, meta=meta))
+                continue
             source_document = sources_by_parent_id.get(parent_doc_id)
             if source_document is None:
                 document_text = ""
@@ -86,7 +101,6 @@ class ContextualRetrievalAnnotator:
                 title = str(source_document.meta.get("title") or "")
                 content = source_document.content or ""
                 document_text = f"Title: {title}\n{content}" if title else content
-            chunk_text = document.content or ""
             prompt = (
                 "<document>\n"
                 f"{document_text}\n"
