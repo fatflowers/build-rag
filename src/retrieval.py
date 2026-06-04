@@ -219,16 +219,20 @@ class BM25StoreLoaderComponent:
 
     def __init__(self, store_path: Path) -> None:
         self.store_path = store_path
+        self._bm25_store: InMemoryDocumentStore | None = None
 
     @component.output_types(bm25_store=InMemoryDocumentStore)
     def run(self) -> dict[str, InMemoryDocumentStore]:
         """Load the BM25 store from disk."""
 
+        if self._bm25_store is not None:
+            return {"bm25_store": self._bm25_store}
         if not self.store_path.exists():
             raise FileNotFoundError(
                 f"BM25 store not found at {self.store_path}. Run ingestion first."
             )
-        return {"bm25_store": InMemoryDocumentStore.load_from_disk(str(self.store_path))}
+        self._bm25_store = InMemoryDocumentStore.load_from_disk(str(self.store_path))
+        return {"bm25_store": self._bm25_store}
 
 
 @component
@@ -289,9 +293,10 @@ class DenseRetrievalComponent:
                 api_key=Secret.from_env_var(self.config.embedding.api_key_env_var),
             )
             embedding_result = cast(Mapping[str, object], embedder.run(text=query_text))
-            embedding = embedding_result.get("embedding")
-            if not _is_number_list(embedding):
+            embedding_value = embedding_result.get("embedding")
+            if not _is_number_list(embedding_value):
                 raise ValueError("Text embedder did not return a numeric embedding.")
+            embedding = [float(value) for value in embedding_value]
             document_store = ChromaDocumentStore(
                 collection_name=self.config.chroma.collection_name,
                 persist_path=str(self.config.chroma.persist_path),
@@ -302,7 +307,7 @@ class DenseRetrievalComponent:
                 top_k=self.config.retrieval.dense_top_k,
             )
             result = retriever.run(
-                query_embedding=[float(value) for value in embedding],
+                query_embedding=embedding,
                 filters=filters,
                 top_k=self.config.retrieval.dense_top_k,
             )

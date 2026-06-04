@@ -13,3 +13,4 @@ data/*
 results/*
 !results/.gitkeep
 .env
+*.log

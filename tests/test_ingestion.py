@@ -13,7 +13,12 @@ from haystack.document_stores.in_memory import InMemoryDocumentStore
 
 from src.config import AppConfig, BM25Config, ContextualRetrievalConfig, get_config
 from src.hotpotqa_loader import HotpotQAStats, normalize_hotpotqa_record
-from src.ingestion import ContextualRetrievalAnnotator, run_ingestion, split_documents
+from src.ingestion import (
+    ContextualRetrievalAnnotator,
+    EmbeddingIntegrityValidator,
+    run_ingestion,
+    split_documents,
+)
 
 
 def _hotpotqa_row() -> dict:
@@ -110,6 +115,43 @@ def test_contextual_retrieval_annotator_prepends_generated_context() -> None:
     assert "<chunk>" in generator.prompts[0]
 
 
+def test_embedding_integrity_validator_fails_missing_embeddings() -> None:
+    """Dense indexing fails fast when embedder output has no vectors."""
+
+    validator = EmbeddingIntegrityValidator(dimension=3)
+    document = Document(id="chunk-1", content="No embedding")
+
+    try:
+        validator.run([document])
+    except RuntimeError as exc:
+        assert "Dense embedding failed before Chroma indexing" in str(exc)
+        assert "chunk-1" in str(exc)
+    else:
+        raise AssertionError("EmbeddingIntegrityValidator did not reject missing embeddings.")
+
+
+def test_embedding_integrity_validator_accepts_expected_dimension() -> None:
+    """Dense indexing continues when every document has a valid vector."""
+
+    validator = EmbeddingIntegrityValidator(dimension=3)
+    document = Document(id="chunk-1", content="Embedded", embedding=[0.1, 0.2, 0.3])
+
+    result = validator.run([document])
+
+    assert result["documents"] == [document]
+
+
+def test_embedding_integrity_validator_allows_unconfigured_dimension() -> None:
+    """Dense indexing can skip dimension validation for providers that infer dimensions."""
+
+    validator = EmbeddingIntegrityValidator(dimension=None)
+    document = Document(id="chunk-1", content="Embedded", embedding=[0.1, 0.2])
+
+    result = validator.run([document])
+
+    assert result["documents"] == [document]
+
+
 def test_run_ingestion_without_chroma_writes_chunks_and_manifest(
     tmp_path: Path,
     monkeypatch,
@@ -201,7 +243,7 @@ def test_get_config_loads_dotenv(tmp_path: Path, monkeypatch) -> None:
                 "INGEST_CONTEXTUAL_MAX_TOKENS=120",
                 "INGEST_CONTEXTUAL_TEMPERATURE=0",
                 "INGEST_EMBEDDING_MODEL=text-embedding-v4",
-                "INGEST_EMBEDDING_DIMENSION=1024",
+                "INGEST_EMBEDDING_DIMENSION=none",
                 "INGEST_EMBEDDING_API_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1",
                 "INGEST_EMBEDDING_API_KEY_ENV_VAR=DASHSCOPE_API_KEY",
                 "INGEST_EMBEDDING_BATCH_SIZE=10",
@@ -232,7 +274,7 @@ def test_get_config_loads_dotenv(tmp_path: Path, monkeypatch) -> None:
     assert config.contextual_retrieval.model == "qwen-flash"
     assert config.contextual_retrieval.max_tokens == 120
     assert config.embedding.model == "text-embedding-v4"
-    assert config.embedding.dimension == 1024
+    assert config.embedding.dimension is None
     assert config.embedding.api_key_env_var == "DASHSCOPE_API_KEY"
     assert config.embedding.batch_size == 10
     assert config.retrieval.search_mode == "bm25"

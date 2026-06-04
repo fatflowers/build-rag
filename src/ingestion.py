@@ -177,6 +177,44 @@ class BM25DocumentStoreWriter:
         return {"bm25_count": document_store.count_documents()}
 
 
+@component
+class EmbeddingIntegrityValidator:
+    """Fail ingestion when dense embedding did not produce usable vectors."""
+
+    def __init__(self, dimension: int | None) -> None:
+        self.dimension = dimension
+
+    @component.output_types(documents=list[Document])
+    def run(self, documents: list[Document]) -> dict[str, list[Document]]:
+        """Validate that every document has an embedding with the expected dimension."""
+
+        missing_ids: list[str] = []
+        wrong_dimension_ids: list[str] = []
+        for document in documents:
+            embedding = document.embedding
+            if embedding is None:
+                missing_ids.append(str(document.id))
+            elif self.dimension is not None and len(embedding) != self.dimension:
+                wrong_dimension_ids.append(str(document.id))
+
+        if missing_ids or wrong_dimension_ids:
+            details: list[str] = []
+            if missing_ids:
+                details.append(f"missing embeddings for {len(missing_ids)} documents")
+            if wrong_dimension_ids:
+                details.append(
+                    f"wrong embedding dimension for {len(wrong_dimension_ids)} documents"
+                )
+            sample_ids = [*missing_ids, *wrong_dimension_ids][:5]
+            raise RuntimeError(
+                "Dense embedding failed before Chroma indexing: "
+                + ", ".join(details)
+                + f". Sample document ids: {sample_ids}"
+            )
+
+        return {"documents": documents}
+
+
 @dataclass(frozen=True)
 class IngestionPipelineRun:
     """Outputs produced by the Haystack ingestion pipeline."""
@@ -229,22 +267,25 @@ def build_chroma_ingestion_pipeline(
         if document_store is None:
             raise ValueError("document_store is required when skip_chroma is false.")
 
-        pipeline.add_component(
-            "embedder",
-            OpenAIDocumentEmbedder(
-                model=config.embedding.model,
-                dimensions=config.embedding.dimension,
-                api_base_url=config.embedding.api_base_url,
-                api_key=Secret.from_env_var(config.embedding.api_key_env_var),
-                batch_size=config.embedding.batch_size,
-            ),
+        embedder = OpenAIDocumentEmbedder(
+            model=config.embedding.model,
+            dimensions=config.embedding.dimension,
+            api_base_url=config.embedding.api_base_url,
+            api_key=Secret.from_env_var(config.embedding.api_key_env_var),
+            batch_size=config.embedding.batch_size,
         )
+        pipeline.add_component("embedder", embedder)
         pipeline.add_component(
             "writer",
             DocumentWriter(document_store=document_store, policy=DuplicatePolicy.OVERWRITE),
         )
+        pipeline.add_component(
+            "embedding_validator",
+            EmbeddingIntegrityValidator(config.embedding.dimension),
+        )
         pipeline.connect("chunk_normalizer.documents", "embedder.documents")
-        pipeline.connect("embedder.documents", "writer.documents")
+        pipeline.connect("embedder.documents", "embedding_validator.documents")
+        pipeline.connect("embedding_validator.documents", "writer.documents")
     return pipeline
 
 

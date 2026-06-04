@@ -66,7 +66,7 @@ class EmbeddingConfig:
 
     provider: str = "dashscope"
     model: str = "text-embedding-v4"
-    dimension: int = 1024
+    dimension: int | None = 1024
     api_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     api_key_env_var: str = "DASHSCOPE_API_KEY"
     batch_size: int = 10
@@ -207,7 +207,10 @@ def get_config() -> AppConfig:
         embedding=EmbeddingConfig(
             provider=os.getenv("INGEST_EMBEDDING_PROVIDER", EmbeddingConfig.provider),
             model=os.getenv("INGEST_EMBEDDING_MODEL", EmbeddingConfig.model),
-            dimension=int(os.getenv("INGEST_EMBEDDING_DIMENSION", str(EmbeddingConfig.dimension))),
+            dimension=_parse_optional_int(
+                os.getenv("INGEST_EMBEDDING_DIMENSION"),
+                EmbeddingConfig.dimension,
+            ),
             api_base_url=os.getenv("INGEST_EMBEDDING_API_BASE_URL", EmbeddingConfig.api_base_url),
             api_key_env_var=os.getenv(
                 "INGEST_EMBEDDING_API_KEY_ENV_VAR",
@@ -329,6 +332,15 @@ def _parse_bm25_algorithm(value: str) -> Literal["BM25Okapi", "BM25L", "BM25Plus
     if value in {"BM25Okapi", "BM25L", "BM25Plus"}:
         return value
     raise ValueError("BM25_ALGORITHM must be one of BM25Okapi, BM25L, or BM25Plus.")
+
+
+def _parse_optional_int(value: str | None, default: int | None) -> int | None:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"", "none", "null"}:
+        return None
+    return int(value)
 
 
 def _parse_search_mode(value: str) -> Literal["hybrid", "dense", "bm25"]:

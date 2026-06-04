@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 from dataclasses import replace
 from pathlib import Path
 
 from src.config import AppConfig, BM25Config, ChromaConfig, get_config
 from src.ingestion import run_ingestion
+from src.observability import configure_observability
 
 
 def main() -> None:
@@ -39,11 +39,14 @@ def main() -> None:
         action="store_false",
     )
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument("--trace-content", action="store_true")
+    parser.add_argument("--openai-debug", action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, defaults.log_level.upper(), logging.INFO),
-        format="%(levelname)s:%(name)s:%(message)s",
+    configure_observability(
+        log_level=defaults.log_level,
+        trace_content=args.trace_content,
+        openai_debug=args.openai_debug,
     )
 
     config = AppConfig(

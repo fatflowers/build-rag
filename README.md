@@ -77,6 +77,21 @@ GENERATION_MIN_GROUNDEDNESS=0.2
 EOF
 ```
 
+OpenRouter embeddings can use Haystack's OpenAI-compatible embedders directly.
+For models that reject custom output dimensions, leave `INGEST_EMBEDDING_DIMENSION`
+empty or set it to `none` so the request omits the `dimensions` parameter:
+
+```bash
+cat >> .env <<'EOF'
+OPENROUTER_API_KEY=your_openrouter_api_key
+INGEST_EMBEDDING_PROVIDER=openrouter
+INGEST_EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
+INGEST_EMBEDDING_DIMENSION=none
+INGEST_EMBEDDING_API_BASE_URL=https://openrouter.ai/api/v1
+INGEST_EMBEDDING_API_KEY_ENV_VAR=OPENROUTER_API_KEY
+EOF
+```
+
 Contextual retrieval follows Anthropic's pattern: for each chunk, the pipeline prompts a generator with the whole parent document and the chunk, then prepends the generated concise context before writing JSONL or embedding into Chroma.
 
 ## Run Ingestion
@@ -100,7 +115,41 @@ uv run python -m src.stage2_ingestion \
   --rebuild
 ```
 
+Print Haystack component inputs and outputs while running ingestion:
+
+```bash
+uv run python -m src.stage2_ingestion \
+  --limit 2 \
+  --rebuild \
+  --trace-content
+```
+
+Debug OpenAI-compatible HTTP calls from the OpenAI SDK:
+
+```bash
+uv run python -m src.stage2_ingestion \
+  --limit 2 \
+  --rebuild \
+  --openai-debug
+```
+
+You can also enable these from `.env`:
+
+```bash
+HAYSTACK_TRACE_CONTENT=true
+OPENAI_LOG=debug
+LOG_LEVEL=DEBUG
+```
+
+`--trace-content` uses Haystack `LoggingTracer` and shows component-level payloads.
+`--openai-debug` enables `openai`, `openai._base_client`, and `httpx` debug logs,
+which include request options, HTTP status, headers, and request ids. The OpenAI
+SDK does not normally print the full raw response body; generated contextual
+retrieval replies are visible through Haystack component outputs when content
+tracing is enabled.
+
 If you change embedding model or dimension, rebuild Chroma so the collection uses one consistent vector shape.
+When `INGEST_EMBEDDING_DIMENSION=none`, Chroma infers the vector dimension from the model's returned embeddings.
 If you change chunking or contextual retrieval settings, rebuild both Chroma and BM25 so dense and sparse retrieval use the same chunk text.
 
 The loader uses Hugging Face:
@@ -162,6 +211,20 @@ uv run python -m src.stage4_rag \
   --search-mode bm25 \
   --relevant-parent-doc-id p1
 ```
+
+Run batch retrieval evaluation over a HotpotQA split:
+
+```bash
+uv run python -m src.stage5_evaluate_retrieval \
+  --search-mode bm25 \
+  --limit 20 \
+  --final-top-k 8
+```
+
+The batch evaluator reads HotpotQA questions and supporting facts, runs the retrieval
+pipeline once per question, and reports dataset-level averages for recall@k,
+precision@k, MRR, nDCG, hit rate, and retrieval latency. Add `--include-cases`
+when you also want per-question details in the JSON output.
 
 Set cost estimates through `.env` when you want system-level cost reporting:
 
