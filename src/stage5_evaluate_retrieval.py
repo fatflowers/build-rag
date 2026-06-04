@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,6 +12,8 @@ from src.batch_retrieval_evaluation import (
     evaluate_hotpotqa_retrieval_batch,
 )
 from src.config import AppConfig, BM25Config, HotpotQAConfig, get_config
+from src.langfuse_tracing import flush_langfuse_traces
+from src.observability import configure_observability
 from src.retrieval import MetadataFilterCriteria
 
 
@@ -64,11 +65,15 @@ def main() -> None:
     parser.add_argument("--filter-type")
     parser.add_argument("--filter-permissions")
     parser.add_argument("--include-cases", action="store_true")
+    parser.add_argument("--trace-content", action="store_true")
+    parser.add_argument("--openai-debug", action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, defaults.log_level.upper(), logging.INFO),
-        format="%(levelname)s:%(name)s:%(message)s",
+    configure_observability(
+        log_level=defaults.log_level,
+        trace_content=args.trace_content,
+        openai_debug=args.openai_debug,
+        langfuse_enabled=defaults.langfuse.enabled,
     )
 
     config = AppConfig(
@@ -107,6 +112,7 @@ def main() -> None:
         ),
         generation=defaults.generation,
         evaluation=defaults.evaluation,
+        langfuse=defaults.langfuse,
         chunks_path=defaults.chunks_path,
         manifest_path=defaults.manifest_path,
         log_level=defaults.log_level,
@@ -118,14 +124,18 @@ def main() -> None:
         question_type=args.filter_type,
         permissions=args.filter_permissions,
     )
-    report = evaluate_hotpotqa_retrieval_batch(config, metadata_filters=filters)
-    print(
-        json.dumps(
-            batch_retrieval_evaluation_report_to_json(report, include_cases=args.include_cases),
-            ensure_ascii=False,
-            sort_keys=True,
+    try:
+        report = evaluate_hotpotqa_retrieval_batch(config, metadata_filters=filters)
+        print(
+            json.dumps(
+                batch_retrieval_evaluation_report_to_json(report, include_cases=args.include_cases),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
         )
-    )
+    finally:
+        flush_langfuse_traces()
 
 
 if __name__ == "__main__":

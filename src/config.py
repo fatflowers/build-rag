@@ -132,6 +132,17 @@ class EvaluationConfig:
 
 
 @dataclass(frozen=True)
+class LangfuseConfig:
+    """Langfuse tracing settings."""
+
+    enabled: bool = False
+    trace_name_prefix: str = "build-rag"
+    public: bool = False
+    public_key_env_var: str = "LANGFUSE_PUBLIC_KEY"
+    secret_key_env_var: str = "LANGFUSE_SECRET_KEY"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """Top-level application configuration."""
 
@@ -145,6 +156,7 @@ class AppConfig:
     retrieval: RetrievalConfig = RetrievalConfig()
     generation: GenerationConfig = GenerationConfig()
     evaluation: EvaluationConfig = EvaluationConfig()
+    langfuse: LangfuseConfig = LangfuseConfig()
     chunks_path: Path = Path("data/hotpotqa_chunks.jsonl")
     manifest_path: Path = Path("results/ingestion_manifest.json")
     log_level: str = "INFO"
@@ -322,6 +334,22 @@ def get_config() -> AppConfig:
                 )
             ),
         ),
+        langfuse=LangfuseConfig(
+            enabled=_parse_langfuse_enabled(),
+            trace_name_prefix=os.getenv(
+                "LANGFUSE_TRACE_NAME_PREFIX",
+                LangfuseConfig.trace_name_prefix,
+            ),
+            public=os.getenv("LANGFUSE_PUBLIC_TRACE", "false").lower() in {"1", "true", "yes"},
+            public_key_env_var=os.getenv(
+                "LANGFUSE_PUBLIC_KEY_ENV_VAR",
+                LangfuseConfig.public_key_env_var,
+            ),
+            secret_key_env_var=os.getenv(
+                "LANGFUSE_SECRET_KEY_ENV_VAR",
+                LangfuseConfig.secret_key_env_var,
+            ),
+        ),
         chunks_path=Path(os.getenv("INGEST_CHUNKS_PATH", "data/hotpotqa_chunks.jsonl")),
         manifest_path=Path(os.getenv("INGEST_MANIFEST_PATH", "results/ingestion_manifest.json")),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
@@ -341,6 +369,13 @@ def _parse_optional_int(value: str | None, default: int | None) -> int | None:
     if normalized in {"", "none", "null"}:
         return None
     return int(value)
+
+
+def _parse_langfuse_enabled() -> bool:
+    explicit = os.getenv("LANGFUSE_ENABLED")
+    if explicit is not None:
+        return explicit.strip().lower() in {"1", "true", "yes"}
+    return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
 
 
 def _parse_search_mode(value: str) -> Literal["hybrid", "dense", "bm25"]:

@@ -24,6 +24,7 @@ from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
 from src.config import AppConfig, ContextualRetrievalConfig
 from src.hotpotqa_loader import HotpotQAStats, load_hotpotqa_documents
+from src.langfuse_tracing import add_langfuse_connector
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +234,7 @@ def build_chroma_ingestion_pipeline(
     """Build the Haystack ingestion pipeline, optionally skipping Chroma or BM25 indexing."""
 
     pipeline = Pipeline()
+    add_langfuse_connector(pipeline, config, "ingestion")
     pipeline.add_component(
         "splitter",
         DocumentSplitter(

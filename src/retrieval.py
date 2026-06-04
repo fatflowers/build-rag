@@ -19,6 +19,7 @@ from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRe
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
 from src.config import AppConfig, QueryProcessingConfig, RetrievalConfig
+from src.langfuse_tracing import add_langfuse_connector
 
 MetaScalar = str | int | float | bool
 JsonValue = MetaScalar | None | list["JsonValue"] | dict[str, "JsonValue"]
@@ -485,6 +486,7 @@ def build_retrieval_pipeline(config: AppConfig) -> Pipeline:
     """Build Pipeline 2 as a Haystack Pipeline graph."""
 
     pipeline = Pipeline()
+    add_langfuse_connector(pipeline, config, "retrieval")
     add_retrieval_pipeline_components(pipeline, config)
     return pipeline
 

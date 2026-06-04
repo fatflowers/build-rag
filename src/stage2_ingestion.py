@@ -9,6 +9,7 @@ from pathlib import Path
 
 from src.config import AppConfig, BM25Config, ChromaConfig, get_config
 from src.ingestion import run_ingestion
+from src.langfuse_tracing import flush_langfuse_traces
 from src.observability import configure_observability
 
 
@@ -47,6 +48,7 @@ def main() -> None:
         log_level=defaults.log_level,
         trace_content=args.trace_content,
         openai_debug=args.openai_debug,
+        langfuse_enabled=defaults.langfuse.enabled,
     )
 
     config = AppConfig(
@@ -76,17 +78,21 @@ def main() -> None:
         ),
         contextual_retrieval=defaults.contextual_retrieval,
         embedding=defaults.embedding,
+        langfuse=defaults.langfuse,
         chunks_path=args.chunks_path,
         manifest_path=args.manifest_path,
         log_level=defaults.log_level,
     )
-    manifest = run_ingestion(
-        config,
-        skip_chroma=args.skip_chroma,
-        skip_bm25=args.skip_bm25,
-        rebuild=args.rebuild,
-    )
-    print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
+    try:
+        manifest = run_ingestion(
+            config,
+            skip_chroma=args.skip_chroma,
+            skip_bm25=args.skip_bm25,
+            rebuild=args.rebuild,
+        )
+        print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
+    finally:
+        flush_langfuse_traces()
 
 
 if __name__ == "__main__":

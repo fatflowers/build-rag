@@ -148,6 +148,21 @@ SDK does not normally print the full raw response body; generated contextual
 retrieval replies are visible through Haystack component outputs when content
 tracing is enabled.
 
+Enable Langfuse tracing for all Haystack pipelines:
+
+```bash
+LANGFUSE_ENABLED=true
+LANGFUSE_PUBLIC_KEY=your_langfuse_public_key
+LANGFUSE_SECRET_KEY=your_langfuse_secret_key
+LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_TRACE_NAME_PREFIX=build-rag
+```
+
+When `LANGFUSE_ENABLED` is omitted, tracing is enabled automatically if both
+Langfuse keys are present. The CLI entry points flush pending Langfuse spans
+before exit, which is especially useful if `HAYSTACK_LANGFUSE_ENFORCE_FLUSH=false`
+is configured.
+
 If you change embedding model or dimension, rebuild Chroma so the collection uses one consistent vector shape.
 When `INGEST_EMBEDDING_DIMENSION=none`, Chroma infers the vector dimension from the model's returned embeddings.
 If you change chunking or contextual retrieval settings, rebuild both Chroma and BM25 so dense and sparse retrieval use the same chunk text.

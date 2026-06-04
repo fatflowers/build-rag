@@ -15,6 +15,7 @@ from src.evaluation import (
     evaluation_report_to_json,
 )
 from src.generation import GeneratedAnswer, TextGenerator, generate_answer, generated_answer_to_json
+from src.langfuse_tracing import add_langfuse_connector
 from src.retrieval import (
     JsonValue,
     MetadataFilterCriteria,
@@ -93,6 +94,7 @@ def build_rag_pipeline(
     """Build Pipeline 3 as a Haystack Pipeline graph."""
 
     pipeline = Pipeline()
+    add_langfuse_connector(pipeline, config, "rag")
     add_retrieval_pipeline_components(pipeline, config)
     pipeline.add_component("answer_generator", AnswerGeneratorComponent(config, generator))
     pipeline.add_component("rag_evaluator", RagEvaluationComponent(config))

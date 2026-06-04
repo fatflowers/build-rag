@@ -258,6 +258,11 @@ def test_get_config_loads_dotenv(tmp_path: Path, monkeypatch) -> None:
                 "EVALUATION_RAGAS_ENABLED=true",
                 "EVALUATION_INPUT_TOKEN_COST_PER_1K=0.001",
                 "EVALUATION_OUTPUT_TOKEN_COST_PER_1K=0.002",
+                "LANGFUSE_ENABLED=true",
+                "LANGFUSE_TRACE_NAME_PREFIX=rag-tests",
+                "LANGFUSE_PUBLIC_TRACE=true",
+                "LANGFUSE_PUBLIC_KEY_ENV_VAR=TEST_LANGFUSE_PUBLIC_KEY",
+                "LANGFUSE_SECRET_KEY_ENV_VAR=TEST_LANGFUSE_SECRET_KEY",
             ]
         )
         + "\n",
@@ -288,3 +293,8 @@ def test_get_config_loads_dotenv(tmp_path: Path, monkeypatch) -> None:
     assert config.evaluation.ragas_enabled is True
     assert config.evaluation.input_token_cost_per_1k == 0.001
     assert config.evaluation.output_token_cost_per_1k == 0.002
+    assert config.langfuse.enabled is True
+    assert config.langfuse.trace_name_prefix == "rag-tests"
+    assert config.langfuse.public is True
+    assert config.langfuse.public_key_env_var == "TEST_LANGFUSE_PUBLIC_KEY"
+    assert config.langfuse.secret_key_env_var == "TEST_LANGFUSE_SECRET_KEY"

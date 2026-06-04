@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 from pathlib import Path
 
 from src.config import AppConfig, BM25Config, RetrievalConfig, get_config
+from src.langfuse_tracing import flush_langfuse_traces
+from src.observability import configure_observability
 from src.retrieval import MetadataFilterCriteria, retrieval_result_to_json, run_retrieval
 
 
@@ -55,11 +56,15 @@ def main() -> None:
     parser.add_argument("--filter-level")
     parser.add_argument("--filter-type")
     parser.add_argument("--filter-permissions")
+    parser.add_argument("--trace-content", action="store_true")
+    parser.add_argument("--openai-debug", action="store_true")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, defaults.log_level.upper(), logging.INFO),
-        format="%(levelname)s:%(name)s:%(message)s",
+    configure_observability(
+        log_level=defaults.log_level,
+        trace_content=args.trace_content,
+        openai_debug=args.openai_debug,
+        langfuse_enabled=defaults.langfuse.enabled,
     )
 
     config = AppConfig(
@@ -73,6 +78,7 @@ def main() -> None:
         ),
         contextual_retrieval=defaults.contextual_retrieval,
         embedding=defaults.embedding,
+        langfuse=defaults.langfuse,
         query_processing=defaults.query_processing,
         retrieval=RetrievalConfig(
             search_mode=args.search_mode,
@@ -101,8 +107,11 @@ def main() -> None:
         question_type=args.filter_type,
         permissions=args.filter_permissions,
     )
-    result = run_retrieval(config, args.query, metadata_filters=filters)
-    print(json.dumps(retrieval_result_to_json(result), ensure_ascii=False, sort_keys=True))
+    try:
+        result = run_retrieval(config, args.query, metadata_filters=filters)
+        print(json.dumps(retrieval_result_to_json(result), ensure_ascii=False, sort_keys=True))
+    finally:
+        flush_langfuse_traces()
 
 
 if __name__ == "__main__":
