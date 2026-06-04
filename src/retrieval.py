@@ -224,7 +224,11 @@ class BM25StoreLoaderComponent:
     def run(self) -> dict[str, InMemoryDocumentStore]:
         """Load the BM25 store from disk."""
 
-        return {"bm25_store": _load_bm25_store(self.store_path)}
+        if not self.store_path.exists():
+            raise FileNotFoundError(
+                f"BM25 store not found at {self.store_path}. Run ingestion first."
+            )
+        return {"bm25_store": InMemoryDocumentStore.load_from_disk(str(self.store_path))}
 
 
 @component
@@ -245,12 +249,18 @@ class BM25RetrievalComponent:
 
         documents: list[Document] = []
         if processed_query.route in {"hybrid", "bm25"}:
-            documents = _run_bm25_retrieval(
-                bm25_store,
-                processed_query.search_queries,
-                filters,
-                self.config.bm25_top_k,
+            retriever = InMemoryBM25Retriever(
+                document_store=bm25_store,
+                top_k=self.config.bm25_top_k,
             )
+            for query in processed_query.search_queries:
+                result = retriever.run(
+                    query=query,
+                    filters=filters,
+                    top_k=self.config.bm25_top_k,
+                )
+                outputs = cast(Mapping[str, list[Document]], result)
+                documents.extend(_tag_documents(outputs["documents"], "bm25"))
         return {"bm25_documents": documents}
 
 
@@ -271,7 +281,33 @@ class DenseRetrievalComponent:
 
         documents: list[Document] = []
         if processed_query.route in {"hybrid", "dense"}:
-            documents = _run_dense_retrieval(self.config, processed_query, filters)
+            query_text = processed_query.hyde_document or processed_query.rewritten_query
+            embedder = OpenAITextEmbedder(
+                model=self.config.embedding.model,
+                dimensions=self.config.embedding.dimension,
+                api_base_url=self.config.embedding.api_base_url,
+                api_key=Secret.from_env_var(self.config.embedding.api_key_env_var),
+            )
+            embedding_result = cast(Mapping[str, object], embedder.run(text=query_text))
+            embedding = embedding_result.get("embedding")
+            if not _is_number_list(embedding):
+                raise ValueError("Text embedder did not return a numeric embedding.")
+            document_store = ChromaDocumentStore(
+                collection_name=self.config.chroma.collection_name,
+                persist_path=str(self.config.chroma.persist_path),
+                distance_function=self.config.chroma.distance_function,
+            )
+            retriever = ChromaEmbeddingRetriever(
+                document_store=document_store,
+                top_k=self.config.retrieval.dense_top_k,
+            )
+            result = retriever.run(
+                query_embedding=[float(value) for value in embedding],
+                filters=filters,
+                top_k=self.config.retrieval.dense_top_k,
+            )
+            outputs = cast(Mapping[str, list[Document]], result)
+            documents = _tag_documents(outputs["documents"], "dense")
         return {"dense_documents": documents}
 
 
@@ -313,7 +349,20 @@ class RerankComponent:
     ) -> dict[str, list[Document]]:
         """Apply the configured reranker."""
 
-        documents = _rerank_documents(query, fused_documents, self.config)
+        if not self.config.enable_rerank or not fused_documents:
+            documents = fused_documents[: self.config.final_top_k]
+        else:
+            ranker = SentenceTransformersSimilarityRanker(
+                model=self.config.reranker_model,
+                top_k=self.config.rerank_top_k,
+            )
+            result = ranker.run(
+                query=query,
+                documents=fused_documents,
+                top_k=self.config.rerank_top_k,
+            )
+            outputs = cast(Mapping[str, list[Document]], result)
+            documents = outputs["documents"][: self.config.final_top_k]
         return {"ranked_documents": documents}
 
 
@@ -328,7 +377,19 @@ class ContextCompressionComponent:
     def run(self, ranked_documents: list[Document]) -> dict[str, list[Document]]:
         """Compress and deduplicate candidate documents."""
 
-        documents = compress_and_deduplicate_documents(ranked_documents, self.config)
+        documents: list[Document] = []
+        seen_ids: set[str] = set()
+        for document in ranked_documents:
+            document_id = str(document.id)
+            if document_id in seen_ids:
+                continue
+            seen_ids.add(document_id)
+            content = document.content or ""
+            if self.config.enable_context_compression:
+                content = content[: self.config.max_context_chars_per_document]
+            documents.append(replace(document, content=content))
+            if len(documents) >= self.config.final_top_k:
+                break
         return {"compressed_documents": documents}
 
 
@@ -347,7 +408,44 @@ class ParentExpansionComponent:
     ) -> dict[str, list[Document]]:
         """Apply small-to-big parent document expansion."""
 
-        documents = expand_parent_documents(compressed_documents, bm25_store, self.config)
+        if not self.config.enable_parent_document_expansion:
+            return {"expanded_documents": compressed_documents}
+
+        documents: list[Document] = []
+        expanded_parent_ids: set[str] = set()
+        for document in compressed_documents:
+            parent_doc_id = str(document.meta.get("parent_doc_id") or "")
+            if not parent_doc_id or parent_doc_id in expanded_parent_ids:
+                documents.append(document)
+                continue
+            filters: ComparisonFilter = {
+                "field": "meta.parent_doc_id",
+                "operator": "==",
+                "value": parent_doc_id,
+            }
+            parent_chunks = sorted(
+                bm25_store.filter_documents(filters=filters),
+                key=_split_id,
+            )
+            if not parent_chunks:
+                documents.append(document)
+                continue
+            expanded_parent_ids.add(parent_doc_id)
+            content = "\n".join(chunk.content or "" for chunk in parent_chunks)
+            if self.config.enable_context_compression:
+                content = content[: self.config.max_context_chars_per_document]
+            meta = dict(document.meta)
+            meta["expanded_from_chunk_id"] = str(document.id)
+            meta["expanded_parent_doc_id"] = parent_doc_id
+            meta["expanded_chunk_count"] = len(parent_chunks)
+            documents.append(
+                replace(
+                    document,
+                    id=f"{parent_doc_id}:parent",
+                    content=content,
+                    meta=meta,
+                )
+            )
         return {"expanded_documents": documents}
 
 
@@ -452,11 +550,16 @@ def build_metadata_filter(criteria: MetadataFilterCriteria) -> MetadataFilter | 
     """Build Haystack exact-match filters from supported metadata fields."""
 
     conditions: list[ComparisonFilter] = []
-    _add_filter_condition(conditions, "meta.source", criteria.source)
-    _add_filter_condition(conditions, "meta.title", criteria.title)
-    _add_filter_condition(conditions, "meta.level", criteria.level)
-    _add_filter_condition(conditions, "meta.type", criteria.question_type)
-    _add_filter_condition(conditions, "meta.permissions", criteria.permissions)
+    filter_values = [
+        ("meta.source", criteria.source),
+        ("meta.title", criteria.title),
+        ("meta.level", criteria.level),
+        ("meta.type", criteria.question_type),
+        ("meta.permissions", criteria.permissions),
+    ]
+    for field, value in filter_values:
+        if value:
+            conditions.append({"field": field, "operator": "==", "value": value})
     if not conditions:
         return None
     if len(conditions) == 1:
@@ -477,68 +580,6 @@ def fuse_hybrid_results(
     return _rrf_fusion(dense_documents, bm25_documents, config)
 
 
-def compress_and_deduplicate_documents(
-    documents: list[Document],
-    config: RetrievalConfig,
-) -> list[Document]:
-    """Deduplicate documents and trim content to save context window."""
-
-    deduped: list[Document] = []
-    seen_ids: set[str] = set()
-    for document in documents:
-        document_id = str(document.id)
-        if document_id in seen_ids:
-            continue
-        seen_ids.add(document_id)
-        content = document.content or ""
-        if config.enable_context_compression:
-            content = content[: config.max_context_chars_per_document]
-        deduped.append(replace(document, content=content))
-        if len(deduped) >= config.final_top_k:
-            break
-    return deduped
-
-
-def expand_parent_documents(
-    documents: list[Document],
-    bm25_store: InMemoryDocumentStore,
-    config: RetrievalConfig,
-) -> list[Document]:
-    """Expand small chunk hits to parent-document context."""
-
-    if not config.enable_parent_document_expansion:
-        return documents
-
-    expanded: list[Document] = []
-    expanded_parent_ids: set[str] = set()
-    for document in documents:
-        parent_doc_id = str(document.meta.get("parent_doc_id") or "")
-        if not parent_doc_id or parent_doc_id in expanded_parent_ids:
-            expanded.append(document)
-            continue
-        parent_chunks = _parent_chunks(bm25_store, parent_doc_id)
-        if not parent_chunks:
-            expanded.append(document)
-            continue
-        expanded_parent_ids.add(parent_doc_id)
-        content = "\n".join(chunk.content or "" for chunk in parent_chunks)
-        if config.enable_context_compression:
-            content = content[: config.max_context_chars_per_document]
-        meta = dict(document.meta)
-        meta["expanded_from_chunk_id"] = str(document.id)
-        meta["expanded_parent_doc_id"] = parent_doc_id
-        meta["expanded_chunk_count"] = len(parent_chunks)
-        expanded.append(
-            replace(
-                document,
-                id=f"{parent_doc_id}:parent",
-                content=content,
-                meta=meta,
-            )
-        )
-    return expanded
-
-
 def retrieval_result_to_json(result: RetrievalResult) -> dict[str, JsonValue]:
     """Serialize retrieval output for CLI use."""
 
@@ -555,69 +596,6 @@ def retrieval_result_to_json(result: RetrievalResult) -> dict[str, JsonValue]:
         "documents": [_document_to_json(document) for document in result.documents],
         "timings": {key: value for key, value in result.timings.items()},
     }
-
-
-def _run_bm25_retrieval(
-    document_store: InMemoryDocumentStore,
-    queries: list[str],
-    filters: MetadataFilter | None,
-    top_k: int,
-) -> list[Document]:
-    retriever = InMemoryBM25Retriever(document_store=document_store, top_k=top_k)
-    documents: list[Document] = []
-    for query in queries:
-        result = retriever.run(query=query, filters=filters, top_k=top_k)
-        outputs = cast(Mapping[str, list[Document]], result)
-        documents.extend(_tag_documents(outputs["documents"], "bm25"))
-    return documents
-
-
-def _run_dense_retrieval(
-    config: AppConfig,
-    processed_query: ProcessedQuery,
-    filters: MetadataFilter | None,
-) -> list[Document]:
-    query_text = processed_query.hyde_document or processed_query.rewritten_query
-    embedder = OpenAITextEmbedder(
-        model=config.embedding.model,
-        dimensions=config.embedding.dimension,
-        api_base_url=config.embedding.api_base_url,
-        api_key=Secret.from_env_var(config.embedding.api_key_env_var),
-    )
-    embedding_result = cast(Mapping[str, object], embedder.run(text=query_text))
-    query_embedding = _extract_embedding(embedding_result)
-    document_store = ChromaDocumentStore(
-        collection_name=config.chroma.collection_name,
-        persist_path=str(config.chroma.persist_path),
-        distance_function=config.chroma.distance_function,
-    )
-    retriever = ChromaEmbeddingRetriever(
-        document_store=document_store,
-        top_k=config.retrieval.dense_top_k,
-    )
-    result = retriever.run(
-        query_embedding=query_embedding,
-        filters=filters,
-        top_k=config.retrieval.dense_top_k,
-    )
-    outputs = cast(Mapping[str, list[Document]], result)
-    return _tag_documents(outputs["documents"], "dense")
-
-
-def _rerank_documents(
-    query: str,
-    documents: list[Document],
-    config: RetrievalConfig,
-) -> list[Document]:
-    if not config.enable_rerank or not documents:
-        return documents[: config.final_top_k]
-    ranker = SentenceTransformersSimilarityRanker(
-        model=config.reranker_model,
-        top_k=config.rerank_top_k,
-    )
-    result = ranker.run(query=query, documents=documents, top_k=config.rerank_top_k)
-    outputs = cast(Mapping[str, list[Document]], result)
-    return outputs["documents"][: config.final_top_k]
 
 
 def _rrf_fusion(
@@ -693,38 +671,6 @@ def _tag_documents(documents: list[Document], source: Literal["dense", "bm25"]) 
         meta[f"{source}_score"] = _score(document)
         tagged_documents.append(replace(document, meta=meta))
     return tagged_documents
-
-
-def _parent_chunks(document_store: InMemoryDocumentStore, parent_doc_id: str) -> list[Document]:
-    filters: ComparisonFilter = {
-        "field": "meta.parent_doc_id",
-        "operator": "==",
-        "value": parent_doc_id,
-    }
-    chunks = document_store.filter_documents(filters=filters)
-    return sorted(chunks, key=_split_id)
-
-
-def _load_bm25_store(path: Path) -> InMemoryDocumentStore:
-    if not path.exists():
-        raise FileNotFoundError(f"BM25 store not found at {path}. Run ingestion first.")
-    return InMemoryDocumentStore.load_from_disk(str(path))
-
-
-def _add_filter_condition(
-    conditions: list[ComparisonFilter],
-    field: str,
-    value: str | None,
-) -> None:
-    if value:
-        conditions.append({"field": field, "operator": "==", "value": value})
-
-
-def _extract_embedding(result: Mapping[str, object]) -> list[float]:
-    embedding = result.get("embedding")
-    if _is_number_list(embedding):
-        return [float(value) for value in embedding]
-    raise ValueError("Text embedder did not return a numeric embedding.")
 
 
 def _is_number_list(value: object) -> TypeGuard[list[int | float]]:

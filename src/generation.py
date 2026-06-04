@@ -125,17 +125,51 @@ def generate_answer(
     start = time.perf_counter()
     prompt, citations = build_generation_prompt(config, query, documents)
 
-    if _should_fallback(config, documents):
-        return _fallback_answer(config, query, prompt, time.perf_counter() - start)
+    context_scores = [
+        0.0 if document.score is None else float(document.score)
+        for document in documents
+    ]
+    if not documents or (
+        config.generation.min_context_score > 0
+        and max(context_scores) < config.generation.min_context_score
+    ):
+        return GeneratedAnswer(
+            query=query,
+            answer=config.generation.no_answer_text,
+            citations=[],
+            prompt=prompt,
+            groundedness=1.0,
+            answer_relevance=0.0,
+            no_answer=True,
+            timings={"total_seconds": time.perf_counter() - start},
+        )
 
-    active_generator = generator or _build_generator(config)
-    answer = _first_reply(active_generator, prompt) or config.generation.no_answer_text
+    active_generator = generator or OpenAIGenerator(
+        model=config.generation.model,
+        api_base_url=config.generation.api_base_url,
+        api_key=Secret.from_env_var(config.generation.api_key_env_var),
+        generation_kwargs={
+            "max_tokens": config.generation.max_tokens,
+            "temperature": config.generation.temperature,
+        },
+    )
+    result = active_generator.run(prompt)
+    replies = result.get("replies", [])
+    answer = replies[0].strip() if replies else ""
+    if not answer:
+        answer = config.generation.no_answer_text
 
-    no_answer = _is_no_answer(answer, config.generation.no_answer_text)
-    used_citations = _select_citations(answer, citations, no_answer)
+    no_answer = answer.strip().upper() == config.generation.no_answer_text.upper()
+    if no_answer:
+        used_citations: list[Citation] = []
+    else:
+        cited_ids = set(_CITATION_PATTERN.findall(answer))
+        used_citations = [citation for citation in citations if citation.citation_id in cited_ids]
+        if not used_citations and citations:
+            used_citations = [citations[0]]
     context = "\n".join(document.content or "" for document in documents)
     groundedness = 1.0 if no_answer else lexical_support_score(answer, context)
-    if _is_ungrounded(config, groundedness, no_answer):
+    if not no_answer and groundedness < config.generation.min_groundedness:
         answer = config.generation.no_answer_text
         no_answer = True
         used_citations = []
@@ -163,7 +197,15 @@ def build_generation_prompt(
     sources: list[PromptSource] = []
     citations: list[Citation] = []
     for index, document in enumerate(documents, start=1):
-        citation = _citation_from_document(str(index), document)
+        title_value = document.meta.get("title")
+        source_value = document.meta.get("source")
+        citation = Citation(
+            citation_id=str(index),
+            document_id=str(document.id),
+            title=title_value if isinstance(title_value, str) and title_value else "Untitled",
+            source=source_value if isinstance(source_value, str) and source_value else "unknown",
+            score=document.score,
+        )
         citations.append(citation)
         sources.append(
             PromptSource(
@@ -206,7 +248,16 @@ def generated_answer_to_json(answer: GeneratedAnswer) -> dict[str, JsonValue]:
         "query": answer.query,
         "answer": answer.answer,
         "no_answer": answer.no_answer,
-        "citations": [_citation_to_json(citation) for citation in answer.citations],
+        "citations": [
+            {
+                "citation_id": citation.citation_id,
+                "document_id": citation.document_id,
+                "title": citation.title,
+                "source": citation.source,
+                "score": citation.score,
+            }
+            for citation in answer.citations
+        ],
         "groundedness": answer.groundedness,
         "answer_relevance": answer.answer_relevance,
         "prompt": answer.prompt,
@@ -214,112 +265,6 @@ def generated_answer_to_json(answer: GeneratedAnswer) -> dict[str, JsonValue]:
     }
 
 
-def _build_generator(config: AppConfig) -> OpenAIGenerator:
-    return OpenAIGenerator(
-        model=config.generation.model,
-        api_base_url=config.generation.api_base_url,
-        api_key=Secret.from_env_var(config.generation.api_key_env_var),
-        generation_kwargs={
-            "max_tokens": config.generation.max_tokens,
-            "temperature": config.generation.temperature,
-        },
-    )
-
-
-def _first_reply(generator: TextGenerator, prompt: str) -> str | None:
-    result = generator.run(prompt)
-    replies = result.get("replies", [])
-    if not replies:
-        return None
-    reply = replies[0].strip()
-    return reply or None
-
-
-def _should_fallback(config: AppConfig, documents: list[Document]) -> bool:
-    if not documents:
-        return True
-    if config.generation.min_context_score <= 0:
-        return False
-    return max(_score(document) for document in documents) < config.generation.min_context_score
-
-
-def _fallback_answer(
-    config: AppConfig,
-    query: str,
-    prompt: str,
-    elapsed_seconds: float,
-) -> GeneratedAnswer:
-    return GeneratedAnswer(
-        query=query,
-        answer=config.generation.no_answer_text,
-        citations=[],
-        prompt=prompt,
-        groundedness=1.0,
-        answer_relevance=0.0,
-        no_answer=True,
-        timings={"total_seconds": elapsed_seconds},
-    )
-
-
-def _citation_from_document(citation_id: str, document: Document) -> Citation:
-    title = _string_meta(document.meta, "title", "Untitled")
-    source = _string_meta(document.meta, "source", "unknown")
-    return Citation(
-        citation_id=citation_id,
-        document_id=str(document.id),
-        title=title,
-        source=source,
-        score=document.score,
-    )
-
-
-def _select_citations(
-    answer: str,
-    citations: list[Citation],
-    no_answer: bool,
-) -> list[Citation]:
-    if no_answer:
-        return []
-    cited_ids = set(_CITATION_PATTERN.findall(answer))
-    selected = [citation for citation in citations if citation.citation_id in cited_ids]
-    if selected or not citations:
-        return selected
-    return [citations[0]]
-
-
-def _is_no_answer(answer: str, no_answer_text: str) -> bool:
-    return answer.strip().upper() == no_answer_text.upper()
-
-
-def _is_ungrounded(config: AppConfig, groundedness: float, no_answer: bool) -> bool:
-    if no_answer:
-        return False
-    return groundedness < config.generation.min_groundedness
-
-
 def _content_words(text: str) -> set[str]:
     words = {match.group(0).lower() for match in _WORD_PATTERN.finditer(text)}
     return {word for word in words if word not in _STOPWORDS and len(word) > 1}
-
-
-def _string_meta(meta: Mapping[str, object], key: str, default: str) -> str:
-    value = meta.get(key)
-    if isinstance(value, str) and value:
-        return value
-    return default
-
-
-def _score(document: Document) -> float:
-    if document.score is None:
-        return 0.0
-    return float(document.score)
-
-
-def _citation_to_json(citation: Citation) -> dict[str, JsonValue]:
-    return {
-        "citation_id": citation.citation_id,
-        "document_id": citation.document_id,
-        "title": citation.title,
-        "source": citation.source,
-        "score": citation.score,
-    }

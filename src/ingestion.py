@@ -70,14 +70,34 @@ class ContextualRetrievalAnnotator:
     ) -> dict[str, list[Document]]:
         """Prepend generated context to each chunk before indexing."""
 
-        sources_by_parent_id = _source_documents_by_parent_id(source_documents)
+        sources_by_parent_id: dict[str, Document] = {}
+        for source_document in source_documents:
+            parent_doc_id = source_document.meta.get("parent_doc_id") or source_document.id
+            sources_by_parent_id[str(parent_doc_id)] = source_document
+
         contextualized_documents: list[Document] = []
         for document in documents:
             parent_doc_id = str(document.meta["parent_doc_id"])
             source_document = sources_by_parent_id.get(parent_doc_id)
-            document_text = _format_source_document(source_document)
+            if source_document is None:
+                document_text = ""
+            else:
+                title = str(source_document.meta.get("title") or "")
+                content = source_document.content or ""
+                document_text = f"Title: {title}\n{content}" if title else content
             chunk_text = document.content or ""
-            prompt = _build_contextual_retrieval_prompt(document_text, chunk_text)
+            prompt = (
+                "<document>\n"
+                f"{document_text}\n"
+                "</document>\n"
+                "Here is the chunk we want to situate within the whole document\n"
+                "<chunk>\n"
+                f"{chunk_text}\n"
+                "</chunk>\n"
+                "Please give a short succinct context to situate this chunk within the overall "
+                "document for the purposes of improving search retrieval of the chunk. Answer "
+                "only with the succinct context and nothing else."
+            )
             result = self.generator.run(
                 prompt,
                 generation_kwargs={
@@ -146,7 +166,15 @@ class BM25DocumentStoreWriter:
         """Persist chunks to the BM25 document store."""
 
         logger.info("Writing BM25 document store to %s", self.config.bm25.store_path)
-        return {"bm25_count": _write_bm25_store(documents, self.config)}
+        self.config.bm25.store_path.parent.mkdir(parents=True, exist_ok=True)
+        document_store = InMemoryDocumentStore(
+            bm25_algorithm=self.config.bm25.algorithm,
+            bm25_tokenization_regex=self.config.bm25.tokenization_regex,
+            return_embedding=False,
+        )
+        document_store.write_documents(documents, policy=DuplicatePolicy.OVERWRITE)
+        document_store.save_to_disk(str(self.config.bm25.store_path))
+        return {"bm25_count": document_store.count_documents()}
 
 
 @dataclass(frozen=True)
@@ -231,15 +259,6 @@ def split_documents(documents: list[Document], config: AppConfig) -> list[Docume
     ).chunks
 
 
-def _create_chroma_document_store(config: AppConfig) -> DocumentStore:
-    config.chroma.persist_path.mkdir(parents=True, exist_ok=True)
-    return ChromaDocumentStore(
-        collection_name=config.chroma.collection_name,
-        persist_path=str(config.chroma.persist_path),
-        distance_function=config.chroma.distance_function,
-    )
-
-
 def _run_haystack_ingestion_pipeline(
     documents: list[Document],
     config: AppConfig,
@@ -265,7 +284,10 @@ def _run_haystack_ingestion_pipeline(
     chunks = cast(list[Document], outputs["chunk_normalizer"]["documents"])
     bm25_count: int | None = None
     if not skip_bm25:
-        bm25_count = _int_output(outputs["bm25_writer"]["bm25_count"])
+        value = outputs["bm25_writer"]["bm25_count"]
+        if not isinstance(value, int):
+            raise TypeError("Haystack ingestion pipeline returned a non-integer BM25 count.")
+        bm25_count = value
     return IngestionPipelineRun(chunks=chunks, bm25_count=bm25_count)
 
 
@@ -292,7 +314,12 @@ def run_ingestion(
     if not skip_chroma:
         if rebuild and config.chroma.persist_path.exists():
             shutil.rmtree(config.chroma.persist_path)
-        document_store = _create_chroma_document_store(config)
+        config.chroma.persist_path.mkdir(parents=True, exist_ok=True)
+        document_store = ChromaDocumentStore(
+            collection_name=config.chroma.collection_name,
+            persist_path=str(config.chroma.persist_path),
+            distance_function=config.chroma.distance_function,
+        )
 
     logger.info("Running Haystack ingestion pipeline for %d documents", len(source_documents))
     pipeline_run = _run_haystack_ingestion_pipeline(
@@ -341,24 +368,6 @@ def _write_chunk_jsonl(chunks: list[Document], path: Path) -> None:
                 )
                 + "\n"
             )
-
-
-def _write_bm25_store(chunks: list[Document], config: AppConfig) -> int:
-    config.bm25.store_path.parent.mkdir(parents=True, exist_ok=True)
-    document_store = InMemoryDocumentStore(
-        bm25_algorithm=config.bm25.algorithm,
-        bm25_tokenization_regex=config.bm25.tokenization_regex,
-        return_embedding=False,
-    )
-    document_store.write_documents(chunks, policy=DuplicatePolicy.OVERWRITE)
-    document_store.save_to_disk(str(config.bm25.store_path))
-    return document_store.count_documents()
-
-
-def _int_output(value: object) -> int:
-    if isinstance(value, int):
-        return value
-    raise TypeError("Haystack ingestion pipeline returned a non-integer BM25 count.")
 
 
 def _build_manifest(
@@ -450,36 +459,3 @@ def _sanitize_meta(meta: Mapping[str, object]) -> dict[str, MetaScalar]:
         else:
             sanitized_meta[key] = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return sanitized_meta
-
-
-def _source_documents_by_parent_id(source_documents: list[Document]) -> dict[str, Document]:
-    sources_by_parent_id: dict[str, Document] = {}
-    for source_document in source_documents:
-        parent_doc_id = source_document.meta.get("parent_doc_id") or source_document.id
-        sources_by_parent_id[str(parent_doc_id)] = source_document
-    return sources_by_parent_id
-
-
-def _format_source_document(source_document: Document | None) -> str:
-    if source_document is None:
-        return ""
-    title = str(source_document.meta.get("title") or "")
-    content = source_document.content or ""
-    if title:
-        return f"Title: {title}\n{content}"
-    return content
-
-
-def _build_contextual_retrieval_prompt(whole_document: str, chunk_content: str) -> str:
-    return (
-        "<document>\n"
-        f"{whole_document}\n"
-        "</document>\n"
-        "Here is the chunk we want to situate within the whole document\n"
-        "<chunk>\n"
-        f"{chunk_content}\n"
-        "</chunk>\n"
-        "Please give a short succinct context to situate this chunk within the overall document "
-        "for the purposes of improving search retrieval of the chunk. Answer only with the "
-        "succinct context and nothing else."
-    )

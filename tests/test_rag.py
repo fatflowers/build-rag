@@ -20,7 +20,10 @@ class FakeGenerator:
         return {"replies": ["Scott Derrickson is American [1]."]}
 
 
-def _write_bm25_store(path: Path) -> None:
+def test_rag_pipeline_runs_retrieval_generation_and_evaluation(tmp_path: Path) -> None:
+    """Pipeline 3 is executed as a Haystack graph."""
+
+    store_path = tmp_path / "bm25.json"
     store = InMemoryDocumentStore(return_embedding=False)
     store.write_documents(
         [
@@ -37,14 +40,7 @@ def _write_bm25_store(path: Path) -> None:
             ),
         ]
     )
-    store.save_to_disk(str(path))
-
-
-def test_rag_pipeline_runs_retrieval_generation_and_evaluation(tmp_path: Path) -> None:
-    """Pipeline 3 is executed as a Haystack graph."""
-
-    store_path = tmp_path / "bm25.json"
-    _write_bm25_store(store_path)
+    store.save_to_disk(str(store_path))
     base = AppConfig()
     config = AppConfig(
         bm25=BM25Config(store_path=store_path),
