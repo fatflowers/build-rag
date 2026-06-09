@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from src.retrieval import (
     MetadataFilterCriteria,
     build_metadata_filter,
     fuse_hybrid_results,
+    run_retrieval_async,
     run_retrieval,
 )
 
@@ -83,6 +85,29 @@ def test_retrieval_runs_bm25_with_parent_expansion(tmp_path: Path) -> None:
     assert result.documents[0].id == "p1:parent"
     assert "Adam Collis worked" in (result.documents[0].content or "")
     assert "American filmmaker" in (result.documents[0].content or "")
+
+
+def test_retrieval_async_runs_bm25_with_parent_expansion(tmp_path: Path) -> None:
+    """BM25 retrieval can run through Haystack AsyncPipeline.run_async."""
+
+    store_path = tmp_path / "bm25.json"
+    _write_bm25_store(store_path)
+    base = AppConfig()
+    config = AppConfig(
+        bm25=BM25Config(store_path=store_path),
+        retrieval=replace(
+            base.retrieval,
+            search_mode="bm25",
+            final_top_k=1,
+            enable_parent_document_expansion=True,
+            max_context_chars_per_document=400,
+        ),
+    )
+
+    result = asyncio.run(run_retrieval_async(config, "Scott Derrickson"))
+
+    assert result.query.route == "bm25"
+    assert result.documents[0].id == "p1:parent"
 
 
 def test_metadata_filter_limits_retrieval_scope(tmp_path: Path) -> None:

@@ -177,6 +177,18 @@ ds = load_dataset("hotpotqa/hotpot_qa", "fullwiki")["validation"]
 
 The ingestion CLI uses the same dataset/config and loads `validation[:limit]` by default.
 
+The ingestion, retrieval, RAG, and batch evaluation CLIs run their Haystack graphs
+with `AsyncPipeline.run_async`. Use `--concurrency-limit` to control the maximum
+number of Haystack components that can execute at the same time inside a pipeline
+run:
+
+```bash
+uv run python -m src.stage3_retrieval \
+  "Scott Derrickson nationality" \
+  --search-mode bm25 \
+  --concurrency-limit 4
+```
+
 ## Run Retrieval
 
 Run a local BM25-only retrieval smoke test:

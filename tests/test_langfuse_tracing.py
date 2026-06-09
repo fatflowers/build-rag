@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from haystack import Pipeline, component
+from haystack import AsyncPipeline, component
 
 import src.langfuse_tracing as langfuse_tracing
 from src.config import AppConfig, LangfuseConfig
@@ -34,7 +34,7 @@ class FakeTracer:
 def test_add_langfuse_connector_is_noop_when_disabled() -> None:
     """Langfuse stays out of the pipeline unless explicitly enabled."""
 
-    pipeline = Pipeline()
+    pipeline = AsyncPipeline()
 
     add_langfuse_connector(pipeline, AppConfig(), "retrieval")
 
@@ -53,7 +53,7 @@ def test_add_langfuse_connector_adds_unconnected_component(monkeypatch) -> None:
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
     monkeypatch.setattr(langfuse_tracing, "_build_langfuse_connector", fake_builder)
-    pipeline = Pipeline()
+    pipeline = AsyncPipeline()
     config = AppConfig(
         langfuse=LangfuseConfig(enabled=True, trace_name_prefix="tests"),
     )

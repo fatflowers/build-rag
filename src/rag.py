@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Mapping, cast
 
-from haystack import Pipeline, component
+from haystack import AsyncPipeline, component
 
 from src.config import AppConfig
 from src.evaluation import (
@@ -90,10 +90,10 @@ def build_rag_pipeline(
     config: AppConfig,
     *,
     generator: TextGenerator | None = None,
-) -> Pipeline:
+) -> AsyncPipeline:
     """Build Pipeline 3 as a Haystack Pipeline graph."""
 
-    pipeline = Pipeline()
+    pipeline = AsyncPipeline()
     add_langfuse_connector(pipeline, config, "rag")
     add_retrieval_pipeline_components(pipeline, config)
     pipeline.add_component("answer_generator", AnswerGeneratorComponent(config, generator))
@@ -120,19 +120,72 @@ def run_rag(
     output = cast(
         Mapping[str, Mapping[str, object]],
         pipeline.run(
-            {
-                "query_processor": {"query": query},
-                "metadata_filter": {
-                    "criteria": metadata_filters or MetadataFilterCriteria(),
-                },
-                "rag_evaluator": {
-                    "relevant_document_ids": list(relevant_document_ids or set()),
-                    "relevant_parent_doc_ids": list(relevant_parent_doc_ids or set()),
-                },
-            },
+            _rag_pipeline_inputs(
+                query=query,
+                metadata_filters=metadata_filters,
+                relevant_document_ids=relevant_document_ids,
+                relevant_parent_doc_ids=relevant_parent_doc_ids,
+            ),
             include_outputs_from={"result_builder", "answer_generator", "rag_evaluator"},
         ),
     )
+    return _parse_rag_pipeline_output(output, start=start)
+
+
+async def run_rag_async(
+    config: AppConfig,
+    query: str,
+    *,
+    metadata_filters: MetadataFilterCriteria | None = None,
+    relevant_document_ids: set[str] | None = None,
+    relevant_parent_doc_ids: set[str] | None = None,
+    generator: TextGenerator | None = None,
+    concurrency_limit: int = 4,
+) -> RagPipelineResult:
+    """Run Pipeline 3 with Haystack AsyncPipeline.run_async."""
+
+    pipeline = build_rag_pipeline(config, generator=generator)
+    start = time.perf_counter()
+    output = cast(
+        Mapping[str, Mapping[str, object]],
+        await pipeline.run_async(
+            _rag_pipeline_inputs(
+                query=query,
+                metadata_filters=metadata_filters,
+                relevant_document_ids=relevant_document_ids,
+                relevant_parent_doc_ids=relevant_parent_doc_ids,
+            ),
+            include_outputs_from={"result_builder", "answer_generator", "rag_evaluator"},
+            concurrency_limit=concurrency_limit,
+        ),
+    )
+    return _parse_rag_pipeline_output(output, start=start)
+
+
+def _rag_pipeline_inputs(
+    *,
+    query: str,
+    metadata_filters: MetadataFilterCriteria | None,
+    relevant_document_ids: set[str] | None,
+    relevant_parent_doc_ids: set[str] | None,
+) -> dict[str, dict[str, object]]:
+    return {
+        "query_processor": {"query": query},
+        "metadata_filter": {
+            "criteria": metadata_filters or MetadataFilterCriteria(),
+        },
+        "rag_evaluator": {
+            "relevant_document_ids": list(relevant_document_ids or set()),
+            "relevant_parent_doc_ids": list(relevant_parent_doc_ids or set()),
+        },
+    }
+
+
+def _parse_rag_pipeline_output(
+    output: Mapping[str, Mapping[str, object]],
+    *,
+    start: float,
+) -> RagPipelineResult:
     retrieval = output["result_builder"]["result"]
     generation = output["answer_generator"]["answer"]
     evaluation = output["rag_evaluator"]["report"]

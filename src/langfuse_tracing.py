@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from haystack import Pipeline
+from haystack import AsyncPipeline
 from haystack.utils import Secret
 
 from src.config import AppConfig, LangfuseConfig
@@ -12,7 +12,7 @@ from src.config import AppConfig, LangfuseConfig
 LANGFUSE_COMPONENT_NAME = "langfuse_tracer"
 
 
-def add_langfuse_connector(pipeline: Pipeline, config: AppConfig, pipeline_name: str) -> None:
+def add_langfuse_connector(pipeline: AsyncPipeline, config: AppConfig, pipeline_name: str) -> None:
     """Attach a Langfuse tracing component when Langfuse is enabled."""
 
     if not config.langfuse.enabled:

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
 from src.config import AppConfig, BM25Config, RetrievalConfig, get_config
 from src.langfuse_tracing import flush_langfuse_traces
 from src.observability import configure_observability
-from src.retrieval import MetadataFilterCriteria, retrieval_result_to_json, run_retrieval
+from src.retrieval import MetadataFilterCriteria, retrieval_result_to_json, run_retrieval_async
 
 
 def main() -> None:
@@ -58,6 +59,7 @@ def main() -> None:
     parser.add_argument("--filter-permissions")
     parser.add_argument("--trace-content", action="store_true")
     parser.add_argument("--openai-debug", action="store_true")
+    parser.add_argument("--concurrency-limit", type=int, default=4)
     args = parser.parse_args()
 
     configure_observability(
@@ -108,7 +110,14 @@ def main() -> None:
         permissions=args.filter_permissions,
     )
     try:
-        result = run_retrieval(config, args.query, metadata_filters=filters)
+        result = asyncio.run(
+            run_retrieval_async(
+                config,
+                args.query,
+                metadata_filters=filters,
+                concurrency_limit=args.concurrency_limit,
+            )
+        )
         print(json.dumps(retrieval_result_to_json(result), ensure_ascii=False, sort_keys=True))
     finally:
         flush_langfuse_traces()

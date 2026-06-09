@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
 
 from src.batch_retrieval_evaluation import (
     batch_retrieval_evaluation_report_to_json,
-    evaluate_hotpotqa_retrieval_batch,
+    evaluate_hotpotqa_retrieval_batch_async,
 )
 from src.config import AppConfig, BM25Config, HotpotQAConfig, get_config
 from src.langfuse_tracing import flush_langfuse_traces
@@ -67,6 +68,7 @@ def main() -> None:
     parser.add_argument("--include-cases", action="store_true")
     parser.add_argument("--trace-content", action="store_true")
     parser.add_argument("--openai-debug", action="store_true")
+    parser.add_argument("--concurrency-limit", type=int, default=4)
     args = parser.parse_args()
 
     configure_observability(
@@ -125,7 +127,13 @@ def main() -> None:
         permissions=args.filter_permissions,
     )
     try:
-        report = evaluate_hotpotqa_retrieval_batch(config, metadata_filters=filters)
+        report = asyncio.run(
+            evaluate_hotpotqa_retrieval_batch_async(
+                config,
+                metadata_filters=filters,
+                concurrency_limit=args.concurrency_limit,
+            )
+        )
         print(
             json.dumps(
                 batch_retrieval_evaluation_report_to_json(report, include_cases=args.include_cases),

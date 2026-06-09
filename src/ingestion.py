@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Protocol, TypeAlias, cast
 
-from haystack import Pipeline, component
+from haystack import AsyncPipeline, component
 from haystack.components.embedders import OpenAIDocumentEmbedder
 from haystack.components.generators import OpenAIGenerator
 from haystack.components.preprocessors import DocumentSplitter
@@ -244,10 +244,10 @@ def build_chroma_ingestion_pipeline(
     *,
     skip_chroma: bool = False,
     skip_bm25: bool = False,
-) -> Pipeline:
+) -> AsyncPipeline:
     """Build the Haystack ingestion pipeline, optionally skipping Chroma or BM25 indexing."""
 
-    pipeline = Pipeline()
+    pipeline = AsyncPipeline()
     add_langfuse_connector(pipeline, config, "ingestion")
     pipeline.add_component(
         "splitter",
@@ -330,13 +330,58 @@ def _run_haystack_ingestion_pipeline(
         skip_chroma=skip_chroma,
         skip_bm25=skip_bm25,
     )
+    result = pipeline.run(
+        _ingestion_pipeline_inputs(documents, config),
+        include_outputs_from=_ingestion_pipeline_outputs(skip_bm25=skip_bm25),
+    )
+    return _parse_ingestion_pipeline_result(result, skip_bm25=skip_bm25)
+
+
+async def _run_haystack_ingestion_pipeline_async(
+    documents: list[Document],
+    config: AppConfig,
+    *,
+    skip_chroma: bool,
+    skip_bm25: bool,
+    document_store: DocumentStore | None = None,
+    concurrency_limit: int = 4,
+) -> IngestionPipelineRun:
+    pipeline = build_chroma_ingestion_pipeline(
+        config,
+        document_store=document_store,
+        skip_chroma=skip_chroma,
+        skip_bm25=skip_bm25,
+    )
+    result = await pipeline.run_async(
+        _ingestion_pipeline_inputs(documents, config),
+        include_outputs_from=_ingestion_pipeline_outputs(skip_bm25=skip_bm25),
+        concurrency_limit=concurrency_limit,
+    )
+    return _parse_ingestion_pipeline_result(result, skip_bm25=skip_bm25)
+
+
+def _ingestion_pipeline_inputs(
+    documents: list[Document],
+    config: AppConfig,
+) -> dict[str, dict[str, list[Document]]]:
     pipeline_inputs: dict[str, dict[str, list[Document]]] = {"splitter": {"documents": documents}}
     if config.chunking.contextual_retrieval:
         pipeline_inputs["contextualizer"] = {"source_documents": documents}
+    return pipeline_inputs
+
+
+def _ingestion_pipeline_outputs(*, skip_bm25: bool) -> set[str]:
     include_outputs = {"chunk_normalizer"}
     if not skip_bm25:
         include_outputs.add("bm25_writer")
-    result = pipeline.run(pipeline_inputs, include_outputs_from=include_outputs)
+    return include_outputs
+
+
+def _parse_ingestion_pipeline_result(
+    result: Mapping[str, Mapping[str, object]],
+    *,
+    skip_bm25: bool,
+) -> IngestionPipelineRun:
     outputs = cast(Mapping[str, Mapping[str, object]], result)
     chunks = cast(list[Document], outputs["chunk_normalizer"]["documents"])
     bm25_count: int | None = None
@@ -357,6 +402,39 @@ def run_ingestion(
 ) -> dict[str, JsonValue]:
     """Run HotpotQA parsing, chunking, BM25 indexing, Chroma indexing, and manifest writing."""
 
+    return _run_ingestion_with_pipeline_run(
+        config,
+        skip_chroma=skip_chroma,
+        skip_bm25=skip_bm25,
+        rebuild=rebuild,
+    )
+
+
+async def run_ingestion_async(
+    config: AppConfig,
+    *,
+    skip_chroma: bool = False,
+    skip_bm25: bool = False,
+    rebuild: bool = False,
+    concurrency_limit: int = 4,
+) -> dict[str, JsonValue]:
+    """Run ingestion with Haystack AsyncPipeline.run_async."""
+
+    return await _run_ingestion_with_pipeline_run_async(
+        config,
+        skip_chroma=skip_chroma,
+        skip_bm25=skip_bm25,
+        rebuild=rebuild,
+        concurrency_limit=concurrency_limit,
+    )
+
+
+def _prepare_ingestion_inputs(
+    config: AppConfig,
+    *,
+    skip_chroma: bool,
+    rebuild: bool,
+) -> tuple[list[Document], HotpotQAStats, ChromaDocumentStore | None, float]:
     start = time.perf_counter()
     logger.info("Loading HotpotQA documents")
     source_documents, stats = load_hotpotqa_documents(
@@ -366,7 +444,6 @@ def run_ingestion(
         limit=config.data.limit,
     )
 
-    chroma_count: int | None = None
     document_store = None
     if not skip_chroma:
         if rebuild and config.chroma.persist_path.exists():
@@ -378,6 +455,21 @@ def run_ingestion(
             distance_function=config.chroma.distance_function,
         )
 
+    return source_documents, stats, document_store, start
+
+
+def _run_ingestion_with_pipeline_run(
+    config: AppConfig,
+    *,
+    skip_chroma: bool,
+    skip_bm25: bool,
+    rebuild: bool,
+) -> dict[str, JsonValue]:
+    source_documents, stats, document_store, start = _prepare_ingestion_inputs(
+        config,
+        skip_chroma=skip_chroma,
+        rebuild=rebuild,
+    )
     logger.info("Running Haystack ingestion pipeline for %d documents", len(source_documents))
     pipeline_run = _run_haystack_ingestion_pipeline(
         source_documents,
@@ -386,13 +478,69 @@ def run_ingestion(
         skip_bm25=skip_bm25,
         document_store=document_store,
     )
-    chunks = pipeline_run.chunks
+    return _finish_ingestion_run(
+        config=config,
+        stats=stats,
+        chunks=pipeline_run.chunks,
+        bm25_count=pipeline_run.bm25_count,
+        document_store=document_store,
+        start=start,
+        skip_chroma=skip_chroma,
+        skip_bm25=skip_bm25,
+    )
+
+
+async def _run_ingestion_with_pipeline_run_async(
+    config: AppConfig,
+    *,
+    skip_chroma: bool,
+    skip_bm25: bool,
+    rebuild: bool,
+    concurrency_limit: int,
+) -> dict[str, JsonValue]:
+    source_documents, stats, document_store, start = _prepare_ingestion_inputs(
+        config,
+        skip_chroma=skip_chroma,
+        rebuild=rebuild,
+    )
+    logger.info("Running Haystack async ingestion pipeline for %d documents", len(source_documents))
+    pipeline_run = await _run_haystack_ingestion_pipeline_async(
+        source_documents,
+        config,
+        skip_chroma=skip_chroma,
+        skip_bm25=skip_bm25,
+        document_store=document_store,
+        concurrency_limit=concurrency_limit,
+    )
+    return _finish_ingestion_run(
+        config=config,
+        stats=stats,
+        chunks=pipeline_run.chunks,
+        bm25_count=pipeline_run.bm25_count,
+        document_store=document_store,
+        start=start,
+        skip_chroma=skip_chroma,
+        skip_bm25=skip_bm25,
+    )
+
+
+def _finish_ingestion_run(
+    *,
+    config: AppConfig,
+    stats: HotpotQAStats,
+    chunks: list[Document],
+    bm25_count: int | None,
+    document_store: ChromaDocumentStore | None,
+    start: float,
+    skip_chroma: bool,
+    skip_bm25: bool,
+) -> dict[str, JsonValue]:
+    chroma_count: int | None = None
     if document_store is not None:
         chroma_count = document_store.count_documents()
 
     logger.info("Writing chunk JSONL to %s", config.chunks_path)
     _write_chunk_jsonl(chunks, config.chunks_path)
-    bm25_count = pipeline_run.bm25_count
 
     manifest = _build_manifest(
         config=config,

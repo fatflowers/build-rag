@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
 
 from src.config import AppConfig, BM25Config, ChromaConfig, get_config
-from src.ingestion import run_ingestion
+from src.ingestion import run_ingestion_async
 from src.langfuse_tracing import flush_langfuse_traces
 from src.observability import configure_observability
 
@@ -42,6 +43,7 @@ def main() -> None:
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--trace-content", action="store_true")
     parser.add_argument("--openai-debug", action="store_true")
+    parser.add_argument("--concurrency-limit", type=int, default=4)
     args = parser.parse_args()
 
     configure_observability(
@@ -84,11 +86,14 @@ def main() -> None:
         log_level=defaults.log_level,
     )
     try:
-        manifest = run_ingestion(
-            config,
-            skip_chroma=args.skip_chroma,
-            skip_bm25=args.skip_bm25,
-            rebuild=args.rebuild,
+        manifest = asyncio.run(
+            run_ingestion_async(
+                config,
+                skip_chroma=args.skip_chroma,
+                skip_bm25=args.skip_bm25,
+                rebuild=args.rebuild,
+                concurrency_limit=args.concurrency_limit,
+            )
         )
         print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
     finally:

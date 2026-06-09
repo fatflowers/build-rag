@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Mapping
 
@@ -49,13 +50,7 @@ def test_batch_retrieval_evaluation_aggregates_hotpotqa_metrics(monkeypatch) -> 
     ]
 
     class FakePipeline:
-        def run(
-            self,
-            data: Mapping[str, Mapping[str, object]],
-            *,
-            include_outputs_from: set[str] | None = None,
-        ) -> Mapping[str, Mapping[str, object]]:
-            query = data["query_processor"]["query"]
+        def _result(self, query: object) -> Mapping[str, Mapping[str, object]]:
             documents = [
                 Document(
                     id="hotpotqa:q1:doc:0:parent",
@@ -99,6 +94,25 @@ def test_batch_retrieval_evaluation_aggregates_hotpotqa_metrics(monkeypatch) -> 
                 }
             }
 
+        def run(
+            self,
+            data: Mapping[str, Mapping[str, object]],
+            *,
+            include_outputs_from: set[str] | None = None,
+        ) -> Mapping[str, Mapping[str, object]]:
+            query = data["query_processor"]["query"]
+            return self._result(query)
+
+        async def run_async(
+            self,
+            data: Mapping[str, Mapping[str, object]],
+            *,
+            include_outputs_from: set[str] | None = None,
+            concurrency_limit: int = 4,
+        ) -> Mapping[str, Mapping[str, object]]:
+            query = data["query_processor"]["query"]
+            return self._result(query)
+
     def fake_read_huggingface_records(
         dataset_name: str,
         dataset_config: str,
@@ -118,9 +132,11 @@ def test_batch_retrieval_evaluation_aggregates_hotpotqa_metrics(monkeypatch) -> 
     )
 
     report = batch_eval.evaluate_hotpotqa_retrieval_batch(config)
+    async_report = asyncio.run(batch_eval.evaluate_hotpotqa_retrieval_batch_async(config))
     payload = batch_eval.batch_retrieval_evaluation_report_to_json(report)
 
     assert report.summary.evaluated_count == 2
+    assert async_report.summary.evaluated_count == 2
     assert report.summary.skipped_count == 0
     assert report.summary.recall_at_k == 1.0
     assert report.summary.precision_at_k == 0.5

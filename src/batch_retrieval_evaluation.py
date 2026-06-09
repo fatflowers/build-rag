@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Mapping, cast
+from typing import Awaitable, Mapping, Protocol, cast
 
 from src.config import AppConfig
 from src.data_sources import read_huggingface_records
@@ -72,6 +72,29 @@ class BatchRetrievalEvaluationReport:
     cases: list[BatchRetrievalEvaluationCase]
 
 
+class RetrievalEvaluationPipeline(Protocol):
+    """Pipeline interface used by batch retrieval evaluation."""
+
+    def run(
+        self,
+        data: Mapping[str, Mapping[str, object]],
+        *,
+        include_outputs_from: set[str] | None = None,
+    ) -> Mapping[str, Mapping[str, object]]:
+        """Run the pipeline synchronously."""
+        ...
+
+    def run_async(
+        self,
+        data: Mapping[str, Mapping[str, object]],
+        *,
+        include_outputs_from: set[str] | None = None,
+        concurrency_limit: int = 4,
+    ) -> Awaitable[Mapping[str, Mapping[str, object]]]:
+        """Run the pipeline asynchronously."""
+        ...
+
+
 def load_hotpotqa_retrieval_examples(config: AppConfig) -> list[HotpotQARetrievalExample]:
     """Load HotpotQA records and derive gold supporting parent document ids."""
 
@@ -120,57 +143,155 @@ def evaluate_hotpotqa_retrieval_batch(
     pipeline = build_retrieval_pipeline(config)
     cases: list[BatchRetrievalEvaluationCase] = []
     skipped_count = 0
-    total_latency_seconds = 0.0
 
     for example in examples:
         if not example.relevant_parent_doc_ids:
             skipped_count += 1
             continue
-
-        start = time.perf_counter()
-        output = cast(
-            Mapping[str, Mapping[str, object]],
-            pipeline.run(
-                {
-                    "query_processor": {"query": example.question},
-                    "metadata_filter": {
-                        "criteria": metadata_filters or MetadataFilterCriteria(),
-                    },
-                },
-                include_outputs_from={"result_builder"},
-            ),
-        )
-        elapsed_seconds = time.perf_counter() - start
-        result = output["result_builder"]["result"]
-        if not isinstance(result, RetrievalResult):
-            raise TypeError("Retrieval pipeline did not return a RetrievalResult.")
-
-        metrics = evaluate_retrieval(
-            result.documents,
-            relevant_parent_doc_ids=example.relevant_parent_doc_ids,
-            k=config.retrieval.final_top_k,
-        )
-        retrieved_parent_doc_ids: list[str] = []
-        for document in result.documents:
-            parent_doc_id = document.meta.get("expanded_parent_doc_id") or document.meta.get(
-                "parent_doc_id"
-            )
-            if isinstance(parent_doc_id, str):
-                retrieved_parent_doc_ids.append(parent_doc_id)
         cases.append(
-            BatchRetrievalEvaluationCase(
-                question_id=example.question_id,
-                question=example.question,
-                answer=example.answer,
-                relevant_parent_doc_ids=sorted(example.relevant_parent_doc_ids),
-                retrieved_document_ids=[str(document.id) for document in result.documents],
-                retrieved_parent_doc_ids=retrieved_parent_doc_ids,
-                metrics=metrics,
-                latency_seconds=elapsed_seconds,
+            _evaluate_retrieval_example(
+                pipeline=pipeline,
+                config=config,
+                example=example,
+                metadata_filters=metadata_filters,
             )
         )
-        total_latency_seconds += elapsed_seconds
 
+    return _build_batch_retrieval_report(config, cases=cases, skipped_count=skipped_count)
+
+
+async def evaluate_hotpotqa_retrieval_batch_async(
+    config: AppConfig,
+    *,
+    metadata_filters: MetadataFilterCriteria | None = None,
+    concurrency_limit: int = 4,
+) -> BatchRetrievalEvaluationReport:
+    """Run retrieval evaluation with Haystack AsyncPipeline.run_async."""
+
+    examples = load_hotpotqa_retrieval_examples(config)
+    pipeline = build_retrieval_pipeline(config)
+    cases: list[BatchRetrievalEvaluationCase] = []
+    skipped_count = 0
+
+    for example in examples:
+        if not example.relevant_parent_doc_ids:
+            skipped_count += 1
+            continue
+        cases.append(
+            await _evaluate_retrieval_example_async(
+                pipeline=pipeline,
+                config=config,
+                example=example,
+                metadata_filters=metadata_filters,
+                concurrency_limit=concurrency_limit,
+            )
+        )
+
+    return _build_batch_retrieval_report(config, cases=cases, skipped_count=skipped_count)
+
+
+def _evaluate_retrieval_example(
+    *,
+    pipeline: RetrievalEvaluationPipeline,
+    config: AppConfig,
+    example: HotpotQARetrievalExample,
+    metadata_filters: MetadataFilterCriteria | None,
+) -> BatchRetrievalEvaluationCase:
+    start = time.perf_counter()
+    output = cast(
+        Mapping[str, Mapping[str, object]],
+        pipeline.run(
+            _pipeline_inputs(example, metadata_filters),
+            include_outputs_from={"result_builder"},
+        ),
+    )
+    return _build_batch_retrieval_case(
+        config=config,
+        example=example,
+        output=output,
+        elapsed_seconds=time.perf_counter() - start,
+    )
+
+
+async def _evaluate_retrieval_example_async(
+    *,
+    pipeline: RetrievalEvaluationPipeline,
+    config: AppConfig,
+    example: HotpotQARetrievalExample,
+    metadata_filters: MetadataFilterCriteria | None,
+    concurrency_limit: int,
+) -> BatchRetrievalEvaluationCase:
+    start = time.perf_counter()
+    output = cast(
+        Mapping[str, Mapping[str, object]],
+        await pipeline.run_async(
+            _pipeline_inputs(example, metadata_filters),
+            include_outputs_from={"result_builder"},
+            concurrency_limit=concurrency_limit,
+        ),
+    )
+    return _build_batch_retrieval_case(
+        config=config,
+        example=example,
+        output=output,
+        elapsed_seconds=time.perf_counter() - start,
+    )
+
+
+def _pipeline_inputs(
+    example: HotpotQARetrievalExample,
+    metadata_filters: MetadataFilterCriteria | None,
+) -> dict[str, dict[str, object]]:
+    return {
+        "query_processor": {"query": example.question},
+        "metadata_filter": {
+            "criteria": metadata_filters or MetadataFilterCriteria(),
+        },
+    }
+
+
+def _build_batch_retrieval_case(
+    *,
+    config: AppConfig,
+    example: HotpotQARetrievalExample,
+    output: Mapping[str, Mapping[str, object]],
+    elapsed_seconds: float,
+) -> BatchRetrievalEvaluationCase:
+    result = output["result_builder"]["result"]
+    if not isinstance(result, RetrievalResult):
+        raise TypeError("Retrieval pipeline did not return a RetrievalResult.")
+
+    metrics = evaluate_retrieval(
+        result.documents,
+        relevant_parent_doc_ids=example.relevant_parent_doc_ids,
+        k=config.retrieval.final_top_k,
+    )
+    retrieved_parent_doc_ids: list[str] = []
+    for document in result.documents:
+        parent_doc_id = document.meta.get("expanded_parent_doc_id") or document.meta.get(
+            "parent_doc_id"
+        )
+        if isinstance(parent_doc_id, str):
+            retrieved_parent_doc_ids.append(parent_doc_id)
+    return BatchRetrievalEvaluationCase(
+        question_id=example.question_id,
+        question=example.question,
+        answer=example.answer,
+        relevant_parent_doc_ids=sorted(example.relevant_parent_doc_ids),
+        retrieved_document_ids=[str(document.id) for document in result.documents],
+        retrieved_parent_doc_ids=retrieved_parent_doc_ids,
+        metrics=metrics,
+        latency_seconds=elapsed_seconds,
+    )
+
+
+def _build_batch_retrieval_report(
+    config: AppConfig,
+    *,
+    cases: list[BatchRetrievalEvaluationCase],
+    skipped_count: int,
+) -> BatchRetrievalEvaluationReport:
+    total_latency_seconds = sum(case.latency_seconds for case in cases)
     evaluated_count = len(cases)
     if evaluated_count == 0:
         summary = BatchRetrievalSummary(

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
 from src.config import AppConfig, BM25Config, RetrievalConfig, get_config
 from src.langfuse_tracing import flush_langfuse_traces
 from src.observability import configure_observability
-from src.rag import rag_pipeline_result_to_json, run_rag
+from src.rag import rag_pipeline_result_to_json, run_rag_async
 from src.retrieval import (
     MetadataFilterCriteria,
 )
@@ -61,6 +62,7 @@ def main() -> None:
     parser.add_argument("--relevant-parent-doc-id", action="append", default=[])
     parser.add_argument("--trace-content", action="store_true")
     parser.add_argument("--openai-debug", action="store_true")
+    parser.add_argument("--concurrency-limit", type=int, default=4)
     args = parser.parse_args()
 
     configure_observability(
@@ -79,12 +81,15 @@ def main() -> None:
         permissions=args.filter_permissions,
     )
     try:
-        result = run_rag(
-            config,
-            args.query,
-            metadata_filters=filters,
-            relevant_document_ids=set(args.relevant_doc_id),
-            relevant_parent_doc_ids=set(args.relevant_parent_doc_id),
+        result = asyncio.run(
+            run_rag_async(
+                config,
+                args.query,
+                metadata_filters=filters,
+                relevant_document_ids=set(args.relevant_doc_id),
+                relevant_parent_doc_ids=set(args.relevant_parent_doc_id),
+                concurrency_limit=args.concurrency_limit,
+            )
         )
         print(json.dumps(rag_pipeline_result_to_json(result), ensure_ascii=False, sort_keys=True))
     finally:

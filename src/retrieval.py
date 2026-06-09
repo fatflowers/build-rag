@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Mapping, Protocol, TypedDict, TypeGuard, cast
 
-from haystack import Pipeline, component
+from haystack import AsyncPipeline, component
 from haystack.components.embedders import OpenAITextEmbedder
 from haystack.components.generators import OpenAIGenerator
 from haystack.components.rankers import SentenceTransformersSimilarityRanker
@@ -482,16 +482,16 @@ class RetrievalResultBuilderComponent:
         }
 
 
-def build_retrieval_pipeline(config: AppConfig) -> Pipeline:
+def build_retrieval_pipeline(config: AppConfig) -> AsyncPipeline:
     """Build Pipeline 2 as a Haystack Pipeline graph."""
 
-    pipeline = Pipeline()
+    pipeline = AsyncPipeline()
     add_langfuse_connector(pipeline, config, "retrieval")
     add_retrieval_pipeline_components(pipeline, config)
     return pipeline
 
 
-def add_retrieval_pipeline_components(pipeline: Pipeline, config: AppConfig) -> None:
+def add_retrieval_pipeline_components(pipeline: AsyncPipeline, config: AppConfig) -> None:
     """Add Pipeline 2 retrieval components to an existing Haystack Pipeline."""
 
     pipeline.add_component("query_processor", QueryProcessorComponent(config.query_processing, config.retrieval))
@@ -538,15 +538,49 @@ def run_retrieval(
     start = time.perf_counter()
     output = cast(
         Mapping[str, Mapping[str, object]],
-        pipeline.run(
-            {
-                "query_processor": {"query": query},
-                "metadata_filter": {
-                    "criteria": metadata_filters or MetadataFilterCriteria(),
-                },
-            }
+        pipeline.run(_retrieval_pipeline_inputs(query, metadata_filters)),
+    )
+    return _parse_retrieval_pipeline_output(output, start=start)
+
+
+async def run_retrieval_async(
+    config: AppConfig,
+    query: str,
+    *,
+    metadata_filters: MetadataFilterCriteria | None = None,
+    concurrency_limit: int = 4,
+) -> RetrievalResult:
+    """Run Pipeline 2 with Haystack AsyncPipeline.run_async."""
+
+    pipeline = build_retrieval_pipeline(config)
+    start = time.perf_counter()
+    output = cast(
+        Mapping[str, Mapping[str, object]],
+        await pipeline.run_async(
+            _retrieval_pipeline_inputs(query, metadata_filters),
+            concurrency_limit=concurrency_limit,
         ),
     )
+    return _parse_retrieval_pipeline_output(output, start=start)
+
+
+def _retrieval_pipeline_inputs(
+    query: str,
+    metadata_filters: MetadataFilterCriteria | None,
+) -> dict[str, dict[str, object]]:
+    return {
+        "query_processor": {"query": query},
+        "metadata_filter": {
+            "criteria": metadata_filters or MetadataFilterCriteria(),
+        },
+    }
+
+
+def _parse_retrieval_pipeline_output(
+    output: Mapping[str, Mapping[str, object]],
+    *,
+    start: float,
+) -> RetrievalResult:
     result = output["result_builder"]["result"]
     if isinstance(result, RetrievalResult):
         return replace(result, timings={"total_seconds": time.perf_counter() - start})

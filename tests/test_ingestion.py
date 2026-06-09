@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from src.hotpotqa_loader import HotpotQAStats, normalize_hotpotqa_record
 from src.ingestion import (
     ContextualRetrievalAnnotator,
     EmbeddingIntegrityValidator,
+    run_ingestion_async,
     run_ingestion,
     split_documents,
 )
@@ -239,6 +241,40 @@ def test_run_ingestion_without_chroma_writes_chunks_and_manifest(
     assert bm25_store.count_documents() == manifest["counts"]["chunks"]
     first_chunk = json.loads(config.chunks_path.read_text(encoding="utf-8").splitlines()[0])
     assert first_chunk["id"]
+
+
+def test_run_ingestion_async_without_chroma_writes_chunks_and_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The ingestion flow can run through Haystack AsyncPipeline.run_async."""
+
+    config = AppConfig(
+        chunking=replace(AppConfig().chunking, contextual_retrieval=False),
+        bm25=BM25Config(store_path=tmp_path / "bm25_store.json"),
+        chunks_path=tmp_path / "chunks.jsonl",
+        manifest_path=tmp_path / "manifest.json",
+    )
+    documents = normalize_hotpotqa_record(_hotpotqa_row(), position=0)
+    stats = HotpotQAStats(
+        records=1,
+        source_documents=3,
+        supporting_documents=2,
+        supporting_facts=2,
+        matched_supporting_facts=2,
+    )
+
+    def fake_load_hotpotqa_documents(**kwargs):
+        return documents, stats
+
+    monkeypatch.setattr(ingestion, "load_hotpotqa_documents", fake_load_hotpotqa_documents)
+
+    manifest = asyncio.run(run_ingestion_async(config, skip_chroma=True))
+
+    assert manifest["counts"]["records"] == 1
+    assert manifest["bm25"]["document_count"] == manifest["counts"]["chunks"]
+    assert config.chunks_path.exists()
+    assert config.bm25.store_path.exists()
 
 
 def test_run_ingestion_can_skip_bm25_writer(
